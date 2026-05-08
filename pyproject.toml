@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brighteyes-mcs-file"
+version = "0.1.1"
+description = "Utilities for reading and calibrating BrightEyes MCS HDF5 files."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Mattia Donato", email = "mattia.donato@iit.it" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+dependencies = [
+    "h5py",
+    "matplotlib",
+    "numpy",
+    "scipy",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+fit = [
+    "joblib",
+    "torch",
+]
+dev = [
+    "build",
+    "pytest",
+    "twine",
+]
+notebook = [
+    "jupyter",
+    "pandas",
+]
+
+[project.urls]
+Homepage = "https://github.com/VicidominiLab/BrightEyes-MCS-File"
+Repository = "https://github.com/VicidominiLab/BrightEyes-MCS-File"
+
+[tool.setuptools.packages.find]
+where = ["src"]
