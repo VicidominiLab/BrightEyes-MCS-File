@@ -1503,7 +1503,13 @@ class Alignment:
 
 
     @staticmethod
-    def sum_channel_applying_shifts(data, shifts_array, axis=(0, 1, 2, 3), reverse_shifts=True):
+    def sum_channel_applying_shifts(
+        data,
+        shifts_array,
+        axis=(0, 1, 2, 3),
+        reverse_shifts=True,
+        show_progress=True,
+    ):
         """
         Apply fractional cyclic shifts to the channel dimension of histogram data
         and sum all channels, conserving total counts.
@@ -1530,6 +1536,10 @@ class Alignment:
             Axes refer to the output array before this final sum, i.e. the
             input shape without the last channel axis: (rep, z, y, x, bin).
             Use ``axis=()`` or ``axis=None`` to keep all non-channel axes.
+
+        show_progress : bool, default True
+            If ``True``, show a ``tqdm`` progress bar while iterating over the
+            flattened batch dimension.
 
         Method
         ------
@@ -1604,7 +1614,8 @@ class Alignment:
 
         out = np.zeros((B, n_bins), dtype=float)
 
-        for b in range(B):
+        progress = tqdm if show_progress else (lambda x, **kwargs: x)
+        for b in progress(range(B), desc="Summing shifted histograms"):
             np.add.at(out[b], j0, w0 * flat_data[b])
             np.add.at(out[b], j1, w1 * flat_data[b])
 

@@ -30,6 +30,7 @@ DEFAULT_FIT_TYPE = "likelihood"
 DEFAULT_C_REF = 1.0
 DEFAULT_IRF_ITERATIONS = 300
 DEFAULT_REGULARIZATION = 0
+DEFAULT_CLEAN_IRF = False
 DEFAULT_CHANNEL_SKEW_TYPE = "phase_cross_correlation"
 DEFAULT_CHANNEL_SKEW_SOURCE = "ref"
 DEFAULT_CHANNEL_SKEW_FIT_REFERENCE_CHANNEL = 12
@@ -96,6 +97,10 @@ class H5DataCalibrator:
         Numerical stability constant passed to the fitting routines.
     regularization : float, default ``0``
         Regularization strength used during IRF estimation.
+    clean_irf : bool, default ``False``
+        If ``True`` and ``reference_type="irf"``, apply
+        :meth:`Alignment.clean_irf_stack` to the realigned IRF stack using the
+        historical notebook settings before it is rescaled for output.
     channel_skew_type : {"phase_cross_correlation"}, default ``"phase_cross_correlation"``
         Strategy used to populate ``channel_skew`` outputs. Only
         ``"phase_cross_correlation"`` is currently supported.
@@ -150,6 +155,7 @@ class H5DataCalibrator:
         irf_iterations=DEFAULT_IRF_ITERATIONS,
         eps=1e-8,
         regularization=DEFAULT_REGULARIZATION,
+        clean_irf=DEFAULT_CLEAN_IRF,
         channel_skew_type=DEFAULT_CHANNEL_SKEW_TYPE,
         channel_skew_source=DEFAULT_CHANNEL_SKEW_SOURCE,
         channel_skew_fit_reference_channel=DEFAULT_CHANNEL_SKEW_FIT_REFERENCE_CHANNEL,
@@ -177,6 +183,7 @@ class H5DataCalibrator:
         self.irf_iterations = irf_iterations
         self.eps = eps
         self.regularization = regularization
+        self.clean_irf = bool(clean_irf)
         self.channel_skew_type = self._normalize_channel_skew_type(channel_skew_type)
         self.channel_skew_source = self._normalize_channel_skew_source(channel_skew_source)
         self.channel_skew_fit_reference_channel = int(channel_skew_fit_reference_channel)
@@ -830,6 +837,7 @@ class H5DataCalibrator:
                     "irf_iterations": self.irf_iterations,
                     "eps": self.eps,
                     "regularization": self.regularization,
+                    "clean_irf": self.clean_irf,
                     "initial_tau": self.initial_tau,
                     "initial_dT": self.initial_dT,
                     "initial_C": self.initial_C,
@@ -901,6 +909,7 @@ class H5DataCalibrator:
                         "irf_iterations": self.irf_iterations,
                         "eps": self.eps,
                         "regularization": self.regularization,
+                        "clean_irf": self.clean_irf,
                         "initial_tau": self.initial_tau,
                         "initial_dT": self.initial_dT,
                         "initial_C": self.initial_C,
@@ -1150,6 +1159,14 @@ class H5DataCalibrator:
                     stacked_irf_common_delay_realigned,
                     axis=-1,
                 )
+                if self.clean_irf and self.reference_type == "irf":
+                    irf_common_delay_realigned_stack = Alignment.clean_irf_stack(
+                        irf_common_delay_realigned_stack,
+                        threshold=0.3,
+                        window=2.0 / dt_ns,
+                        time_axis=0,
+                        normalize=True,
+                    )
                 irf_common_delay_realigned_stack = self._normalize_stack_to_fingerprint(
                     irf_common_delay_realigned_stack,
                     reference_fingerprint_for_output_channels,
@@ -1313,6 +1330,7 @@ def calibrate_h5_file(
     C_ref=DEFAULT_C_REF,
     irf_iterations=DEFAULT_IRF_ITERATIONS,
     regularization=DEFAULT_REGULARIZATION,
+    clean_irf=DEFAULT_CLEAN_IRF,
     channel_skew_type=DEFAULT_CHANNEL_SKEW_TYPE,
     channel_skew_source=DEFAULT_CHANNEL_SKEW_SOURCE,
     channel_skew_fit_reference_channel=DEFAULT_CHANNEL_SKEW_FIT_REFERENCE_CHANNEL,
@@ -1356,6 +1374,10 @@ def calibrate_h5_file(
         Number of iterations used when estimating the IRF.
     regularization : float, default ``0``
         Regularization strength used during IRF estimation.
+    clean_irf : bool, default ``False``
+        If ``True`` and ``reference_type="irf"``, apply
+        :meth:`Alignment.clean_irf_stack` to the realigned IRF stack using the
+        historical notebook settings before it is rescaled for output.
     channel_skew_type : {"phase_cross_correlation"}, default ``"phase_cross_correlation"``
         Strategy used to generate ``channel_skew`` outputs. Only
         ``"phase_cross_correlation"`` is currently supported.
@@ -1403,6 +1425,7 @@ def calibrate_h5_file(
         C_ref=C_ref,
         irf_iterations=irf_iterations,
         regularization=regularization,
+        clean_irf=clean_irf,
         channel_skew_type=channel_skew_type,
         channel_skew_source=channel_skew_source,
         channel_skew_fit_reference_channel=channel_skew_fit_reference_channel,
