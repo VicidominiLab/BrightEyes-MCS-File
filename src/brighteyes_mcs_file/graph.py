@@ -326,7 +326,7 @@ def plot_calibration_shift_summary(summary_tables, labels=None, reference_channe
         channel_skew = _column(table, "channel_skew").astype(float)
         channel_skew_err = _column(table, "channel_skew_est_err").astype(float)
         common_delay = _column(table, "common_delay_in_ns").astype(float)
-        common_delay_err = _column(table, "common_delay_err_in_ns").astype(float)
+        fit_common_delay_err = _column(table, "fit_common_delay_err_in_ns").astype(float)
 
         shift_container = ax_shift.errorbar(
             channels,
@@ -341,7 +341,7 @@ def plot_calibration_shift_summary(summary_tables, labels=None, reference_channe
         delay_container = ax_delay.errorbar(
             channels,
             common_delay,
-            yerr=common_delay_err,
+            yerr=fit_common_delay_err,
             fmt="o--",
             linewidth=2,
             markersize=5,

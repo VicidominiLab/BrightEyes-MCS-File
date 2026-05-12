@@ -5,7 +5,6 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
-from scipy.ndimage import shift
 from tqdm.auto import tqdm
 try:
     from scipy import optimize as scipy_optimize
@@ -522,12 +521,77 @@ class Alignment:
 
     @staticmethod
     def linear_shift(data, shift_value, cyclic=True):
-        xp = np.arange(0, data.shape[0])
-        fp = data.copy()
-        x = np.arange(0, data.shape[0]) - shift_value
-        if cyclic:
-            x = np.mod(x, data.shape[0])
-        return np.interp(x, xp, fp)
+        hist = Alignment.to_numpy_1d(data, dtype=float)
+        x = np.arange(hist.shape[0], dtype=float) - float(shift_value)
+        if not cyclic:
+            return np.interp(x, np.arange(hist.shape[0]), hist, left=0.0, right=0.0)
+
+        j0 = np.floor(x).astype(np.intp)
+        alpha = x - j0
+        j1 = j0 + 1
+        return (
+            (1.0 - alpha) * hist[j0 % hist.shape[0]]
+            + alpha * hist[j1 % hist.shape[0]]
+        )
+
+    @staticmethod
+    def _model_data_binned_fast(
+        t_base_ns,
+        dt_ns,
+        nbin,
+        period_ns,
+        C,
+        tau,
+        shift_bins=0.0,
+    ):
+        C_norm = float(C)
+        tau_ns = float(tau)
+        shift_ns = float(shift_bins) * (period_ns / nbin)
+        t_local_ns = t_base_ns - shift_ns
+
+        t_start_ns = t_local_ns - 0.5 * dt_ns
+        u0_ns = np.mod(t_start_ns, period_ns)
+        u1_ns = u0_ns + dt_ns
+        denom = 1.0 - np.exp(-period_ns / tau_ns)
+
+        model_hist = np.empty(nbin, dtype=float)
+        same_period = u1_ns <= period_ns
+
+        model_hist[same_period] = (
+            tau_ns
+            * (
+                np.exp(-u0_ns[same_period] / tau_ns)
+                - np.exp(-u1_ns[same_period] / tau_ns)
+            )
+            / denom
+        )
+
+        if np.any(~same_period):
+            wrapped_u1_ns = u1_ns[~same_period] - period_ns
+            first_leg = (
+                tau_ns
+                * (
+                    np.exp(-u0_ns[~same_period] / tau_ns)
+                    - np.exp(-period_ns / tau_ns)
+                )
+                / denom
+            )
+            second_leg = (
+                tau_ns
+                * (1.0 - np.exp(-wrapped_u1_ns / tau_ns))
+                / denom
+            )
+            model_hist[~same_period] = first_leg + second_leg
+
+        return C_norm * model_hist / model_hist.sum()
+
+    @staticmethod
+    def _cyclic_fft_convolve_centered(volume, kernel, kernel_fft=None):
+        volume_fft = np.fft.fft(np.asarray(volume, dtype=float))
+        if kernel_fft is None:
+            kernel_fft = np.fft.fft(np.asarray(kernel, dtype=float))
+        conv = np.fft.ifft(volume_fft * kernel_fft)
+        return np.fft.ifftshift(np.real(conv))
 
     @staticmethod
     def fit_data_with_ref_or_irf(
@@ -804,43 +868,68 @@ class Alignment:
         """
         t_ns = Alignment.to_numpy_1d(t, dtype=float)
         irf_hist = Alignment.to_numpy_1d(irf, dtype=float)
+        period_ns = float(period)
+        mode = str(mode)
+
+        if len(t_ns) != len(irf_hist):
+            raise ValueError("t and irf must have the same 1D length")
+        if len(t_ns) < 2:
+            raise ValueError("fit_model_data requires at least two time samples")
+        if mode not in {"model_shift", "irf_shift"}:
+            raise ValueError(
+                f"Unsupported mode: {mode}. Supported model_shift, irf_shift"
+            )
+
+        dt_ns = float(t_ns[1] - t_ns[0])
+        if not np.allclose(np.diff(t_ns), dt_ns):
+            raise ValueError("fit_model_data requires uniformly spaced t values")
+
+        irf_sum = irf_hist.sum()
+        if not np.isfinite(irf_sum) or irf_sum <= 0:
+            raise ValueError("irf contains non-finite values or has non-positive sum")
+
         C_norm = float(C)
         dT_bins = float(dT)
         tau_ns = float(tau)
-        period_ns = float(period)
+        nbin = len(t_ns)
+        t_base_ns = t_ns - period_ns - (period_ns / 2.0)
+        irf_hist = irf_hist / irf_sum
 
         if mode == "model_shift":
-            pure_model_hist = Alignment.model_data(
-                t=t_ns,
-                C=C_norm,
-                tau=tau_ns,
-                period=period_ns,
+            pure_model_hist = Alignment._model_data_binned_fast(
+                t_base_ns,
+                dt_ns,
+                nbin,
+                period_ns,
+                C_norm,
+                tau_ns,
                 shift_bins=dT_bins,
             )
             fit_irf_hist = irf_hist
-        elif mode == "irf_shift":
-            pure_model_hist = Alignment.model_data(
-                t=t_ns,
-                C=C_norm,
-                tau=tau_ns,
-                period=period_ns,
-            )
-            fit_irf_hist = shift(irf_hist, dT_bins, order=1, mode="grid-wrap")
+            fit_irf_fft = np.fft.fft(fit_irf_hist)
         else:
-            raise ValueError(f"Unsupported mode: {mode}. Supported model_shift, irf_shift")
+            pure_model_hist = Alignment._model_data_binned_fast(
+                t_base_ns,
+                dt_ns,
+                nbin,
+                period_ns,
+                C_norm,
+                tau_ns,
+            )
+            fit_irf_hist = Alignment.linear_shift(
+                irf_hist,
+                dT_bins,
+                cyclic=True,
+            )
+            fit_irf_fft = None
 
         pure_model_hist = pure_model_hist / pure_model_hist.sum()
         fit_irf_hist = fit_irf_hist / fit_irf_hist.sum()
 
-        pure_model_hist = Alignment.to_torch_1d(pure_model_hist)
-        fit_irf_hist = Alignment.to_torch_1d(fit_irf_hist)
-        return Alignment.partial_convolution_fft(
+        return Alignment._cyclic_fft_convolve_centered(
             pure_model_hist,
             fit_irf_hist,
-            dim1="t",
-            dim2="t",
-            axis="t",
-            fourier=(0, 0),
+            kernel_fft=fit_irf_fft,
         )
 
     @staticmethod
@@ -937,10 +1026,7 @@ class Alignment:
             return irf_hist_norm, initial_dT, None
 
         dT_seed_bins = Alignment.estimate_peak_dT_bins(data_hist_norm, irf_hist_norm)
-        fit_irf_hist_norm = np.asarray(
-            shift(irf_hist_norm, dT_seed_bins, order=1, mode="grid-wrap"),
-            dtype=float,
-        )
+        fit_irf_hist_norm = Alignment.linear_shift(irf_hist_norm, dT_seed_bins, cyclic=True)
         fit_irf_hist_norm = fit_irf_hist_norm / fit_irf_hist_norm.sum()
         return fit_irf_hist_norm, 0.0, dT_seed_bins
 
@@ -1236,6 +1322,15 @@ class Alignment:
 
         if len(t_ns) != len(data_hist) or len(t_ns) != len(irf_hist):
             raise ValueError("t, data, and irf must have the same 1D length")
+        if len(t_ns) < 2:
+            raise ValueError("perform_fit_data requires at least two time samples")
+        if mode not in {"model_shift", "irf_shift"}:
+            raise ValueError(
+                f"Unsupported mode: {mode}. Supported model_shift, irf_shift"
+            )
+        dt_ns = float(t_ns[1] - t_ns[0])
+        if not np.allclose(np.diff(t_ns), dt_ns):
+            raise ValueError("perform_fit_data requires uniformly spaced t values")
 
         data_sum = data_hist.sum()
         irf_sum = irf_hist.sum()
@@ -1248,6 +1343,8 @@ class Alignment:
         Alignment._require_scipy_optimize()
 
         nbin = len(t_ns)
+        period_ns = float(period)
+        t_base_ns = t_ns - period_ns - (period_ns / 2.0)
         tau_lower_bound = float(irf_min)
         if tau_lower_bound <= 0:
             raise ValueError("irf_min must be positive")
@@ -1261,18 +1358,35 @@ class Alignment:
             irf_hist_norm,
             initial_dT,
         )
+        fit_irf_fft = np.fft.fft(fit_irf_hist_norm) if mode == "model_shift" else None
 
-        def fit_model_numpy(t_ns_fit, C_norm, dT_bins, tau_ns):
-            model_hist = Alignment.fit_model_data(
-                t_ns_fit,
+        def fit_model_numpy(_t_ns_fit, C_norm, dT_bins, tau_ns):
+            shift_bins = dT_bins if mode == "model_shift" else 0.0
+            pure_model_hist = Alignment._model_data_binned_fast(
+                t_base_ns,
+                dt_ns,
+                nbin,
+                period_ns,
                 C_norm,
-                dT_bins,
                 tau_ns,
-                irf=fit_irf_hist_norm,
-                period=period,
-                mode=mode,
+                shift_bins=shift_bins,
             )
-            return Alignment.to_numpy_1d(model_hist, dtype=float)
+            if mode == "irf_shift":
+                fit_irf_hist = Alignment.linear_shift(
+                    fit_irf_hist_norm,
+                    dT_bins,
+                    cyclic=True,
+                )
+                kernel_fft = None
+            else:
+                fit_irf_hist = fit_irf_hist_norm
+                kernel_fft = fit_irf_fft
+
+            return Alignment._cyclic_fft_convolve_centered(
+                pure_model_hist / pure_model_hist.sum(),
+                fit_irf_hist / fit_irf_hist.sum(),
+                kernel_fft=kernel_fft,
+            )
 
         initial_guess = Alignment._fit_initial_guess(
             initial_C,
@@ -1370,6 +1484,33 @@ class Alignment:
             return (y, x, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
 
     @staticmethod
+    def _fit_map_pixel_chunk(indices, histograms, **worker_kwargs):
+        return [
+            Alignment._fit_map_one_pixel(int(idx), hist, **worker_kwargs)
+            for idx, hist in zip(indices, histograms)
+        ]
+
+    @staticmethod
+    def _fit_map_job_chunk_size(valid_count, n_jobs, job_chunk_size):
+        if job_chunk_size is not None:
+            return max(1, int(job_chunk_size))
+
+        if int(n_jobs) == 1:
+            return 1
+
+        if int(n_jobs) > 0:
+            worker_count = int(n_jobs)
+        else:
+            try:
+                from os import cpu_count
+                worker_count = cpu_count() or 1
+            except Exception:  # pragma: no cover - extremely defensive fallback
+                worker_count = 1
+
+        target_chunks = max(worker_count * 8, 1)
+        return max(1, int(np.ceil(valid_count / target_chunks)))
+
+    @staticmethod
     def generate_fit_maps(
         data,
         irf,
@@ -1382,9 +1523,12 @@ class Alignment:
         fit_type="likelihood",
         force_C_normalized=True,
         min_counts=0.0,
+        min_peak_counts=0.0,
+        min_nonzero_bins=1,
         valid_mask=None,
         n_jobs=1,
         backend="loky",
+        job_chunk_size=None,
         show_progress=True,
         catch_exceptions=True,
     ):
@@ -1394,6 +1538,12 @@ class Alignment:
         Returns a dictionary with ``C``, ``dT``, ``tau``, ``C_err``,
         ``dT_err``, and ``tau_err`` maps. Invalid or failed pixels are filled
         with NaNs.
+
+        ``min_counts``, ``min_peak_counts``, ``min_nonzero_bins``, and
+        ``valid_mask`` are applied before fitting so low-information pixels can
+        be skipped cheaply. With ``n_jobs != 1``, pixels are submitted to joblib
+        in chunks instead of one job per pixel; override ``job_chunk_size`` when
+        a specific chunk size is needed.
         """
         data_array = np.asarray(data, dtype=float)
         irf_hist = Alignment.to_numpy_1d(irf, dtype=float)
@@ -1413,9 +1563,12 @@ class Alignment:
             raise ValueError("irf contains non-finite values or has non-positive sum")
 
         data_2d = data_array.reshape(-1, nbins)
+        data_sums = np.sum(data_2d, axis=1)
         pixel_is_valid = (
             np.all(np.isfinite(data_2d), axis=1)
-            & (np.sum(data_2d, axis=1) > float(min_counts))
+            & (data_sums > float(min_counts))
+            & (np.max(data_2d, axis=1) >= float(min_peak_counts))
+            & (np.count_nonzero(data_2d > 0, axis=1) >= int(min_nonzero_bins))
         )
 
         if valid_mask is not None:
@@ -1468,10 +1621,24 @@ class Alignment:
             except ImportError as exc:  # pragma: no cover - optional dependency
                 raise ImportError("joblib is required when n_jobs is not 1") from exc
 
-            results = Parallel(n_jobs=n_jobs, backend=backend, verbose=0)(
-                delayed(Alignment._fit_map_one_pixel)(int(idx), data_2d[int(idx)], **worker_kwargs)
-                for idx in progress(valid_indices, desc="Fitting pixels")
+            chunk_size = Alignment._fit_map_job_chunk_size(
+                valid_indices.size,
+                n_jobs=n_jobs,
+                job_chunk_size=job_chunk_size,
             )
+            index_chunks = [
+                valid_indices[start:start + chunk_size]
+                for start in range(0, valid_indices.size, chunk_size)
+            ]
+            results = Parallel(n_jobs=n_jobs, backend=backend, verbose=0)(
+                delayed(Alignment._fit_map_pixel_chunk)(
+                    chunk,
+                    data_2d[chunk],
+                    **worker_kwargs,
+                )
+                for chunk in progress(index_chunks, desc="Fitting pixel chunks")
+            )
+            results = [row for chunk_result in results for row in chunk_result]
 
         for y, x, C, dT, tau, C_err, dT_err, tau_err in results:
             fit_maps["C"][y, x] = C
@@ -1501,6 +1668,117 @@ class Alignment:
     def hist_for_plot(hist):
         return Alignment.to_numpy_1d(hist)
 
+    @staticmethod
+    def _resolve_shift_sum_backend(backend):
+        backend = str(backend).strip().lower()
+        aliases = {
+            "auto": "auto",
+            "cpu": "cpu",
+            "numpy": "cpu",
+            "np": "cpu",
+            "gpu": "gpu",
+            "cuda": "gpu",
+        }
+        if backend not in aliases:
+            raise ValueError("backend must be one of 'auto', 'cpu', or 'gpu'")
+
+        backend = aliases[backend]
+        gpu_available = (
+            torch is not None
+            and hasattr(torch, "cuda")
+            and torch.cuda.is_available()
+        )
+
+        if backend == "auto":
+            if gpu_available:
+                return "gpu"
+            warnings.warn(
+                "sum_channel_applying_shifts backend='auto' requested GPU, "
+                "but CUDA is not available; falling back to CPU.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            return "cpu"
+
+        if backend == "gpu" and not gpu_available:
+            if torch is None:
+                raise ImportError("backend='gpu' requires torch with CUDA support")
+            raise RuntimeError(
+                "backend='gpu' requested, but torch.cuda.is_available() is False"
+            )
+
+        return backend
+
+    @staticmethod
+    def _shift_sum_indices_and_weights(n_bins, shifts):
+        i = np.arange(n_bins, dtype=float)[:, None]
+        s = np.asarray(shifts, dtype=float)[None, :]
+
+        dst = i - s
+        j0 = np.floor(dst).astype(np.intp)
+        alpha = dst - j0
+        j1 = j0 + 1
+
+        return (
+            (j0 % n_bins).reshape(-1),
+            (j1 % n_bins).reshape(-1),
+            (1.0 - alpha).reshape(-1),
+            alpha.reshape(-1),
+        )
+
+    @staticmethod
+    def _shift_sum_weight_matrix_numpy(n_bins, shifts):
+        j0, j1, w0, w1 = Alignment._shift_sum_indices_and_weights(n_bins, shifts)
+        rows = np.arange(j0.size)
+        weights = np.zeros((j0.size, n_bins), dtype=float)
+        np.add.at(weights, (rows, j0), w0)
+        np.add.at(weights, (rows, j1), w1)
+        return weights
+
+    @staticmethod
+    def _sum_channel_applying_shifts_cpu(flat, n_bins, shifts):
+        weights = Alignment._shift_sum_weight_matrix_numpy(n_bins, shifts)
+        return flat.reshape(flat.shape[0], -1) @ weights
+
+    @staticmethod
+    def _default_gpu_chunk_size(batch_size, flat_width, dtype):
+        bytes_per_value = torch.empty((), dtype=dtype).element_size()
+        target_bytes = 256 * 1024 * 1024
+        return max(
+            1,
+            min(batch_size, target_bytes // max(flat_width * bytes_per_value, 1)),
+        )
+
+    @staticmethod
+    def _sum_channel_applying_shifts_gpu(flat, n_bins, shifts, show_progress, chunk_size=None):
+        Alignment._require_torch()
+        device = torch.device("cuda")
+        dtype = torch.float64
+        flat_width = n_bins * len(shifts)
+        batch_size = flat.shape[0]
+        if chunk_size is None:
+            chunk_size = Alignment._default_gpu_chunk_size(batch_size, flat_width, dtype)
+        else:
+            chunk_size = max(1, int(chunk_size))
+
+        weights_np = Alignment._shift_sum_weight_matrix_numpy(n_bins, shifts)
+        weights = torch.as_tensor(weights_np, dtype=dtype, device=device)
+        out = np.empty((batch_size, n_bins), dtype=float)
+
+        progress = tqdm if show_progress else (lambda x, **kwargs: x)
+        for start in progress(
+            range(0, batch_size, chunk_size),
+            desc="Summing shifted histogram chunks",
+        ):
+            stop = min(start + chunk_size, batch_size)
+            chunk = torch.as_tensor(
+                flat[start:stop].reshape(stop - start, flat_width),
+                dtype=dtype,
+                device=device,
+            )
+            out[start:stop] = (chunk @ weights).cpu().numpy()
+
+        return out
 
     @staticmethod
     def sum_channel_applying_shifts(
@@ -1508,6 +1786,8 @@ class Alignment:
         shifts_array,
         axis=(0, 1, 2, 3),
         reverse_shifts=True,
+        backend="auto",
+        chunk_size=None,
         show_progress=True,
     ):
         """
@@ -1537,9 +1817,18 @@ class Alignment:
             input shape without the last channel axis: (rep, z, y, x, bin).
             Use ``axis=()`` or ``axis=None`` to keep all non-channel axes.
 
+        backend : {"auto", "cpu", "gpu"}, default "auto"
+            Execution backend. ``"auto"`` uses CUDA when PyTorch reports an
+            available GPU and warns before falling back to CPU otherwise.
+            ``"cpu"`` uses a NumPy/BLAS matrix multiplication. ``"gpu"``
+            requires a CUDA-capable PyTorch installation.
+
+        chunk_size : int, optional
+            Number of flattened histograms processed per GPU chunk. Ignored by
+            the CPU backend.
+
         show_progress : bool, default True
-            If ``True``, show a ``tqdm`` progress bar while iterating over the
-            flattened batch dimension.
+            If ``True``, show a ``tqdm`` progress bar for GPU chunks.
 
         Method
         ------
@@ -1562,8 +1851,8 @@ class Alignment:
         ----------------------
         - Leading dimensions (rep, z, y, x) are flattened for batch processing.
         - All shifts are computed vectorially across channels.
-        - Accumulation uses np.add.at (scatter-add).
-        - A loop over flattened batches remains (NumPy limitation).
+        - CPU accumulation is a single weighted matrix multiplication.
+        - GPU accumulation is chunked to limit CUDA memory use.
 
         Returns
         -------
@@ -1590,34 +1879,17 @@ class Alignment:
             raise ValueError(f"shifts_array must have shape ({n_hist},), got {shifts.shape}")
 
         flat = data.reshape(-1, n_bins, n_hist)  # (B, bin, ch)
-        B = flat.shape[0]
-
-        i = np.arange(n_bins)[:, None]           # (bin,1)
-        s = shifts[None, :]                      # (1,ch)
-
-        dst = i - s
-        j0 = np.floor(dst).astype(int)
-        alpha = dst - j0
-        j1 = j0 + 1
-
-        j0 %= n_bins
-        j1 %= n_bins
-
-        # Flatten everything
-        flat_data = flat.reshape(B, -1)          # (B, bin*ch)
-        j0 = j0.reshape(-1)
-        j1 = j1.reshape(-1)
-        alpha = alpha.reshape(-1)
-
-        w0 = (1 - alpha)
-        w1 = alpha
-
-        out = np.zeros((B, n_bins), dtype=float)
-
-        progress = tqdm if show_progress else (lambda x, **kwargs: x)
-        for b in progress(range(B), desc="Summing shifted histograms"):
-            np.add.at(out[b], j0, w0 * flat_data[b])
-            np.add.at(out[b], j1, w1 * flat_data[b])
+        resolved_backend = Alignment._resolve_shift_sum_backend(backend)
+        if resolved_backend == "gpu":
+            out = Alignment._sum_channel_applying_shifts_gpu(
+                flat,
+                n_bins,
+                shifts,
+                show_progress=show_progress,
+                chunk_size=chunk_size,
+            )
+        else:
+            out = Alignment._sum_channel_applying_shifts_cpu(flat, n_bins, shifts)
 
         out = out.reshape(*prefix, n_bins)
 

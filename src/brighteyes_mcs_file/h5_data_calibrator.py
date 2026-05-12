@@ -31,6 +31,7 @@ DEFAULT_C_REF = 1.0
 DEFAULT_IRF_ITERATIONS = 300
 DEFAULT_REGULARIZATION = 0
 DEFAULT_CLEAN_IRF = False
+DEFAULT_IRF_CORRECTIONS_TYPE = "median"
 DEFAULT_CHANNEL_SKEW_TYPE = "phase_cross_correlation"
 DEFAULT_CHANNEL_SKEW_SOURCE = "ref"
 DEFAULT_CHANNEL_SKEW_FIT_REFERENCE_CHANNEL = 12
@@ -101,6 +102,11 @@ class H5DataCalibrator:
         If ``True`` and ``reference_type="irf"``, apply
         :meth:`Alignment.clean_irf_stack` to the realigned IRF stack using the
         historical notebook settings before it is rescaled for output.
+    irf_corrections_type : {"median", "single_ch"}, default ``"median"``
+        Strategy used to choose the delay applied when building the realigned
+        IRF/reference stacks. ``"median"`` uses the median fitted delay across
+        finite fitted channels. ``"single_ch"`` uses each channel's own fitted
+        delay, preserving the historical behavior.
     channel_skew_type : {"phase_cross_correlation"}, default ``"phase_cross_correlation"``
         Strategy used to populate ``channel_skew`` outputs. Only
         ``"phase_cross_correlation"`` is currently supported.
@@ -156,6 +162,7 @@ class H5DataCalibrator:
         eps=1e-8,
         regularization=DEFAULT_REGULARIZATION,
         clean_irf=DEFAULT_CLEAN_IRF,
+        irf_corrections_type=DEFAULT_IRF_CORRECTIONS_TYPE,
         channel_skew_type=DEFAULT_CHANNEL_SKEW_TYPE,
         channel_skew_source=DEFAULT_CHANNEL_SKEW_SOURCE,
         channel_skew_fit_reference_channel=DEFAULT_CHANNEL_SKEW_FIT_REFERENCE_CHANNEL,
@@ -184,6 +191,9 @@ class H5DataCalibrator:
         self.eps = eps
         self.regularization = regularization
         self.clean_irf = bool(clean_irf)
+        self.irf_corrections_type = self._normalize_irf_corrections_type(
+            irf_corrections_type
+        )
         self.channel_skew_type = self._normalize_channel_skew_type(channel_skew_type)
         self.channel_skew_source = self._normalize_channel_skew_source(channel_skew_source)
         self.channel_skew_fit_reference_channel = int(channel_skew_fit_reference_channel)
@@ -192,6 +202,28 @@ class H5DataCalibrator:
 
         if self.channel_skew_fit_upsampling <= 0:
             raise ValueError("channel_skew_fit_upsampling must be a positive integer")
+
+    @staticmethod
+    def _normalize_irf_corrections_type(irf_corrections_type):
+        normalized = str(irf_corrections_type).strip().lower()
+        aliases = {
+            "median": "median",
+            "med": "median",
+            "single_ch": "single_ch",
+            "single_channel": "single_ch",
+            "channel": "single_ch",
+            "ch": "single_ch",
+            "single": "single_ch",
+            "each": "single_ch",
+            "per_channel": "single_ch",
+        }
+        if normalized not in aliases:
+            raise ValueError(
+                "irf_corrections_type must be 'median' or one of "
+                "'single_ch', 'single_channel', 'channel', 'ch', 'single', "
+                "'each', 'per_channel'"
+            )
+        return aliases[normalized]
 
     @staticmethod
     def _normalize_channel_skew_type(channel_skew_type):
@@ -553,8 +585,8 @@ class H5DataCalibrator:
         errors = {
             "fit_param_C_err": np.nan,
             "tau_err_ns": np.nan,
-            "common_delay_err_in_bins": np.nan,
-            "common_delay_err_in_ns": np.nan,
+            "fit_common_delay_err_in_bins": np.nan,
+            "fit_common_delay_err_in_ns": np.nan,
         }
         covariance = np.asarray(covariance, dtype=float)
         if covariance.shape != (3, 3):
@@ -562,11 +594,11 @@ class H5DataCalibrator:
 
         diag = np.diag(covariance)
         errors["fit_param_C_err"] = cls._std_from_variance(diag[0])
-        errors["common_delay_err_in_bins"] = cls._std_from_variance(diag[1])
+        errors["fit_common_delay_err_in_bins"] = cls._std_from_variance(diag[1])
         errors["tau_err_ns"] = cls._std_from_variance(diag[2])
-        if np.isfinite(errors["common_delay_err_in_bins"]) and np.isfinite(dt_ns):
-            errors["common_delay_err_in_ns"] = float(
-                errors["common_delay_err_in_bins"] * float(dt_ns)
+        if np.isfinite(errors["fit_common_delay_err_in_bins"]) and np.isfinite(dt_ns):
+            errors["fit_common_delay_err_in_ns"] = float(
+                errors["fit_common_delay_err_in_bins"] * float(dt_ns)
             )
         return errors
 
@@ -592,6 +624,57 @@ class H5DataCalibrator:
         return float(np.sqrt(np.mean(np.square(residual))))
 
     @staticmethod
+    def _compute_irf_correction_delays(fit_delay_in_bins, irf_corrections_type, data_key):
+        fit_delay_in_bins = np.asarray(fit_delay_in_bins, dtype=float)
+        correction_delay = np.full_like(fit_delay_in_bins, np.nan, dtype=float)
+        finite_fit = np.isfinite(fit_delay_in_bins)
+
+        if irf_corrections_type == "single_ch":
+            correction_delay[finite_fit] = fit_delay_in_bins[finite_fit]
+            return correction_delay
+
+        if not np.any(finite_fit):
+            warnings.warn(
+                (
+                    "Unable to compute median IRF correction delay for data key "
+                    f"{data_key!r}: no finite fitted delays were found"
+                ),
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return correction_delay
+
+        correction_delay[finite_fit] = float(np.nanmedian(fit_delay_in_bins[finite_fit]))
+        return correction_delay
+
+    @staticmethod
+    def _realign_histogram_stack(stack, correction_delay_in_bins, output_name):
+        stack = np.asarray(stack, dtype=float)
+        correction_delay_in_bins = np.asarray(correction_delay_in_bins, dtype=float)
+        if stack.ndim != 2:
+            raise ValueError(
+                f"{output_name} source stack must have shape (t, ch), got {stack.shape}"
+            )
+        if correction_delay_in_bins.shape != (stack.shape[1],):
+            raise ValueError(
+                f"{output_name} correction delay must have shape ({stack.shape[1]},), "
+                f"got {correction_delay_in_bins.shape}"
+            )
+
+        realigned = np.zeros_like(stack, dtype=float)
+        for channel_position, correction_delay in enumerate(correction_delay_in_bins):
+            if not np.isfinite(correction_delay):
+                continue
+            hist = stack[:, channel_position]
+            if not np.isfinite(hist).all() or np.sum(hist) <= 0:
+                continue
+            realigned[:, channel_position] = Alignment._normalize_histogram_1d(
+                Alignment.linear_shift(hist, correction_delay, cyclic=True),
+                name=output_name,
+            )
+        return realigned
+
+    @staticmethod
     def _empty_fit_payload(
         nbin,
         reference_type,
@@ -606,20 +689,18 @@ class H5DataCalibrator:
             "tau_ns": np.nan,
             "tau_err_ns": np.nan,
             "tau_ref_ns": np.nan,
-            "common_delay_in_bins": np.nan,
-            "common_delay_in_ns": np.nan,
-            "common_delay_err_in_bins": np.nan,
-            "common_delay_err_in_ns": np.nan,
+            "fit_common_delay_in_bins": np.nan,
+            "fit_common_delay_in_ns": np.nan,
+            "fit_common_delay_err_in_bins": np.nan,
+            "fit_common_delay_err_in_ns": np.nan,
             "fit_error": np.nan,
             "data_for_fit": np.asarray(data_for_fit_histogram, dtype=float),
             "irf_for_fit": zero_hist.copy(),
-            "irf_common_delay_realigned": zero_hist.copy(),
             "data_fitted": zero_hist.copy(),
             "irf_type": str(irf_type),
         }
         if reference_type == "ref":
             payload["ref_for_fit"] = np.asarray(ref_for_fit_histogram, dtype=float)
-            payload["ref_common_delay_realigned"] = zero_hist.copy()
         return payload
 
     def _prepare_output_file(self):
@@ -838,6 +919,7 @@ class H5DataCalibrator:
                     "eps": self.eps,
                     "regularization": self.regularization,
                     "clean_irf": self.clean_irf,
+                    "irf_corrections_type": self.irf_corrections_type,
                     "initial_tau": self.initial_tau,
                     "initial_dT": self.initial_dT,
                     "initial_C": self.initial_C,
@@ -910,6 +992,7 @@ class H5DataCalibrator:
                         "eps": self.eps,
                         "regularization": self.regularization,
                         "clean_irf": self.clean_irf,
+                        "irf_corrections_type": self.irf_corrections_type,
                         "initial_tau": self.initial_tau,
                         "initial_dT": self.initial_dT,
                         "initial_C": self.initial_C,
@@ -946,18 +1029,16 @@ class H5DataCalibrator:
                 stacked_tau_ns = []
                 stacked_tau_err_ns = []
                 stacked_tau_ref_ns = []
-                stacked_common_delay_in_bins = []
-                stacked_common_delay_err_in_bins = []
-                stacked_common_delay_in_ns = []
-                stacked_common_delay_err_in_ns = []
+                stacked_fit_common_delay_in_bins = []
+                stacked_fit_common_delay_in_ns = []
+                stacked_fit_common_delay_err_in_bins = []
+                stacked_fit_common_delay_err_in_ns = []
                 stacked_fit_error = []
                 stacked_irf_type = []
                 stacked_data_for_fit = []
                 stacked_irf_for_fit = []
-                stacked_irf_common_delay_realigned = []
                 stacked_data_fitted = []
                 stacked_ref_for_fit = []
-                stacked_ref_common_delay_realigned = []
 
                 channel_iterator = tqdm(
                     channel_indices,
@@ -1035,10 +1116,6 @@ class H5DataCalibrator:
                         try:
                             fit_result = Alignment.fit_data_with_ref_or_irf(**fit_kwargs)
                             irf_for_fit = np.asarray(fit_result["irf"], dtype=float)
-                            irf_common_delay_realigned = Alignment._normalize_histogram_1d(
-                                Alignment.linear_shift(irf_for_fit, fit_result["dT"], cyclic=True),
-                                name="irf_common_delay_realigned",
-                            )
                             data_fitted = np.asarray(fit_result["fit"], dtype=float)
                             parameter_errors = self._parameter_error_payload(
                                 fit_result["cov"],
@@ -1054,33 +1131,25 @@ class H5DataCalibrator:
                                     if fit_result["tau_ref"] is None
                                     else float(fit_result["tau_ref"])
                                 ),
-                                "common_delay_in_bins": float(fit_result["dT"]),
-                                "common_delay_in_ns": float(fit_result["dT_ns"]),
-                                "common_delay_err_in_bins": float(
-                                    parameter_errors["common_delay_err_in_bins"]
+                                "fit_common_delay_in_bins": float(fit_result["dT"]),
+                                "fit_common_delay_in_ns": float(fit_result["dT_ns"]),
+                                "fit_common_delay_err_in_bins": float(
+                                    parameter_errors["fit_common_delay_err_in_bins"]
                                 ),
-                                "common_delay_err_in_ns": float(
-                                    parameter_errors["common_delay_err_in_ns"]
+                                "fit_common_delay_err_in_ns": float(
+                                    parameter_errors["fit_common_delay_err_in_ns"]
                                 ),
                                 "fit_error": float(
                                     self._fit_error(data_for_fit_histogram, data_fitted)
                                 ),
                                 "data_for_fit": np.asarray(data_for_fit_histogram, dtype=float),
                                 "irf_for_fit": np.asarray(irf_for_fit, dtype=float),
-                                "irf_common_delay_realigned": np.asarray(
-                                    irf_common_delay_realigned,
-                                    dtype=float,
-                                ),
                                 "data_fitted": data_fitted,
                                 "irf_type": str(fit_result["irf_source"]),
                             }
                             if self.reference_type == "ref":
                                 fit_payload["ref_for_fit"] = np.asarray(
                                     ref_for_fit_histogram,
-                                    dtype=float,
-                                )
-                                fit_payload["ref_common_delay_realigned"] = np.asarray(
-                                    fit_result["ref_shifted"],
                                     dtype=float,
                                 )
                         except Exception as exc:
@@ -1107,27 +1176,25 @@ class H5DataCalibrator:
                     stacked_tau_ns.append(float(fit_payload["tau_ns"]))
                     stacked_tau_err_ns.append(float(fit_payload["tau_err_ns"]))
                     stacked_tau_ref_ns.append(float(fit_payload["tau_ref_ns"]))
-                    stacked_common_delay_in_bins.append(float(fit_payload["common_delay_in_bins"]))
-                    stacked_common_delay_err_in_bins.append(
-                        float(fit_payload["common_delay_err_in_bins"])
+                    stacked_fit_common_delay_in_bins.append(
+                        float(fit_payload["fit_common_delay_in_bins"])
                     )
-                    stacked_common_delay_in_ns.append(float(fit_payload["common_delay_in_ns"]))
-                    stacked_common_delay_err_in_ns.append(
-                        float(fit_payload["common_delay_err_in_ns"])
+                    stacked_fit_common_delay_in_ns.append(
+                        float(fit_payload["fit_common_delay_in_ns"])
+                    )
+                    stacked_fit_common_delay_err_in_bins.append(
+                        float(fit_payload["fit_common_delay_err_in_bins"])
+                    )
+                    stacked_fit_common_delay_err_in_ns.append(
+                        float(fit_payload["fit_common_delay_err_in_ns"])
                     )
                     stacked_fit_error.append(float(fit_payload["fit_error"]))
                     stacked_irf_type.append(str(fit_payload["irf_type"]))
                     stacked_data_for_fit.append(np.asarray(fit_payload["data_for_fit"], dtype=float))
                     stacked_irf_for_fit.append(np.asarray(fit_payload["irf_for_fit"], dtype=float))
-                    stacked_irf_common_delay_realigned.append(
-                        np.asarray(fit_payload["irf_common_delay_realigned"], dtype=float)
-                    )
                     stacked_data_fitted.append(np.asarray(fit_payload["data_fitted"], dtype=float))
                     if self.reference_type == "ref":
                         stacked_ref_for_fit.append(np.asarray(fit_payload["ref_for_fit"], dtype=float))
-                        stacked_ref_common_delay_realigned.append(
-                            np.asarray(fit_payload["ref_common_delay_realigned"], dtype=float)
-                        )
 
                 channel_index_array = np.asarray(stacked_channel_index, dtype=int)
                 channel_used_for_reference_in_time_skew_array = np.asarray(
@@ -1142,22 +1209,35 @@ class H5DataCalibrator:
                 tau_ns_array = np.asarray(stacked_tau_ns, dtype=float)
                 tau_err_ns_array = np.asarray(stacked_tau_err_ns, dtype=float)
                 tau_ref_ns_array = np.asarray(stacked_tau_ref_ns, dtype=float)
-                common_delay_in_bins_array = np.asarray(stacked_common_delay_in_bins, dtype=float)
-                common_delay_err_in_bins_array = np.asarray(
-                    stacked_common_delay_err_in_bins,
+                fit_common_delay_in_bins_array = np.asarray(
+                    stacked_fit_common_delay_in_bins,
                     dtype=float,
                 )
-                common_delay_in_ns_array = np.asarray(stacked_common_delay_in_ns, dtype=float)
-                common_delay_err_in_ns_array = np.asarray(
-                    stacked_common_delay_err_in_ns,
+                fit_common_delay_in_ns_array = np.asarray(
+                    stacked_fit_common_delay_in_ns,
+                    dtype=float,
+                )
+                common_delay_in_bins_array = self._compute_irf_correction_delays(
+                    fit_common_delay_in_bins_array,
+                    self.irf_corrections_type,
+                    data_key,
+                )
+                common_delay_in_ns_array = common_delay_in_bins_array * float(dt_ns)
+                fit_common_delay_err_in_bins_array = np.asarray(
+                    stacked_fit_common_delay_err_in_bins,
+                    dtype=float,
+                )
+                fit_common_delay_err_in_ns_array = np.asarray(
+                    stacked_fit_common_delay_err_in_ns,
                     dtype=float,
                 )
                 fit_error_array = np.asarray(stacked_fit_error, dtype=float)
                 data_for_fit_stack = np.stack(stacked_data_for_fit, axis=-1)
                 irf_for_fit_stack = np.stack(stacked_irf_for_fit, axis=-1)
-                irf_common_delay_realigned_stack = np.stack(
-                    stacked_irf_common_delay_realigned,
-                    axis=-1,
+                irf_common_delay_realigned_stack = self._realign_histogram_stack(
+                    irf_for_fit_stack,
+                    common_delay_in_bins_array,
+                    "irf_common_delay_realigned",
                 )
                 if self.clean_irf and self.reference_type == "irf":
                     irf_common_delay_realigned_stack = Alignment.clean_irf_stack(
@@ -1186,6 +1266,16 @@ class H5DataCalibrator:
                 self._replace_dataset(target_group, "tau_ref_ns", tau_ref_ns_array)
                 self._replace_dataset(
                     target_group,
+                    "fit_common_delay_in_bins",
+                    fit_common_delay_in_bins_array,
+                )
+                self._replace_dataset(
+                    target_group,
+                    "fit_common_delay_in_ns",
+                    fit_common_delay_in_ns_array,
+                )
+                self._replace_dataset(
+                    target_group,
                     "common_delay_in_bins",
                     common_delay_in_bins_array,
                 )
@@ -1196,13 +1286,13 @@ class H5DataCalibrator:
                 )
                 self._replace_dataset(
                     target_group,
-                    "common_delay_err_in_bins",
-                    common_delay_err_in_bins_array,
+                    "fit_common_delay_err_in_bins",
+                    fit_common_delay_err_in_bins_array,
                 )
                 self._replace_dataset(
                     target_group,
-                    "common_delay_err_in_ns",
-                    common_delay_err_in_ns_array,
+                    "fit_common_delay_err_in_ns",
+                    fit_common_delay_err_in_ns_array,
                 )
                 self._replace_dataset(
                     target_group,
@@ -1236,9 +1326,10 @@ class H5DataCalibrator:
                 }
                 if self.reference_type == "ref":
                     ref_for_fit_stack = np.stack(stacked_ref_for_fit, axis=-1)
-                    ref_common_delay_realigned_stack = np.stack(
-                        stacked_ref_common_delay_realigned,
-                        axis=-1,
+                    ref_common_delay_realigned_stack = self._realign_histogram_stack(
+                        ref_for_fit_stack,
+                        common_delay_in_bins_array,
+                        "ref_common_delay_realigned",
                     )
                     ref_common_delay_realigned_stack = self._normalize_stack_to_fingerprint(
                         ref_common_delay_realigned_stack,
@@ -1331,6 +1422,7 @@ def calibrate_h5_file(
     irf_iterations=DEFAULT_IRF_ITERATIONS,
     regularization=DEFAULT_REGULARIZATION,
     clean_irf=DEFAULT_CLEAN_IRF,
+    irf_corrections_type=DEFAULT_IRF_CORRECTIONS_TYPE,
     channel_skew_type=DEFAULT_CHANNEL_SKEW_TYPE,
     channel_skew_source=DEFAULT_CHANNEL_SKEW_SOURCE,
     channel_skew_fit_reference_channel=DEFAULT_CHANNEL_SKEW_FIT_REFERENCE_CHANNEL,
@@ -1378,6 +1470,10 @@ def calibrate_h5_file(
         If ``True`` and ``reference_type="irf"``, apply
         :meth:`Alignment.clean_irf_stack` to the realigned IRF stack using the
         historical notebook settings before it is rescaled for output.
+    irf_corrections_type : {"median", "single_ch"}, default ``"median"``
+        Strategy used to choose the delay applied to the realigned IRF/reference
+        stacks. Median mode stores the raw fitted per-channel delay separately
+        from the correction delay actually used.
     channel_skew_type : {"phase_cross_correlation"}, default ``"phase_cross_correlation"``
         Strategy used to generate ``channel_skew`` outputs. Only
         ``"phase_cross_correlation"`` is currently supported.
@@ -1426,6 +1522,7 @@ def calibrate_h5_file(
         irf_iterations=irf_iterations,
         regularization=regularization,
         clean_irf=clean_irf,
+        irf_corrections_type=irf_corrections_type,
         channel_skew_type=channel_skew_type,
         channel_skew_source=channel_skew_source,
         channel_skew_fit_reference_channel=channel_skew_fit_reference_channel,
