@@ -326,6 +326,7 @@ def plot_calibration_shift_summary(summary_tables, labels=None, reference_channe
         channel_skew = _column(table, "channel_skew").astype(float)
         channel_skew_err = _column(table, "channel_skew_est_err").astype(float)
         common_delay = _column(table, "common_delay_in_ns").astype(float)
+        fit_common_delay = _column(table, "fit_common_delay_in_ns").astype(float)
         fit_common_delay_err = _column(table, "fit_common_delay_err_in_ns").astype(float)
 
         shift_container = ax_shift.errorbar(
@@ -348,10 +349,20 @@ def plot_calibration_shift_summary(summary_tables, labels=None, reference_channe
             capsize=3,
             label=label,
         )
+        delay_container = ax_delay.errorbar(
+            channels,
+            fit_common_delay,
+            yerr=fit_common_delay_err,
+            fmt="o--",
+            linewidth=2,
+            markersize=5,
+            capsize=3,
+            label=label,
+        )
         shift_color = shift_container.lines[0].get_color()
         delay_color = delay_container.lines[0].get_color()
         shift_bins = min(20, max(5, np.count_nonzero(np.isfinite(channel_skew))))
-        delay_bins = min(20, max(5, np.count_nonzero(np.isfinite(common_delay))))
+        delay_bins = min(20, max(5, np.count_nonzero(np.isfinite(fit_common_delay))))
         _plot_vertical_value_histogram(
             channel_skew,
             ax_shift_hist,
@@ -362,7 +373,7 @@ def plot_calibration_shift_summary(summary_tables, labels=None, reference_channe
             show_stats=True,
         )
         _plot_vertical_value_histogram(
-            common_delay,
+            fit_common_delay,
             ax_delay_hist,
             bins=delay_bins,
             color=delay_color,
