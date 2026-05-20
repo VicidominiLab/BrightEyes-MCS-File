@@ -91,6 +91,17 @@ class H5DataCalibrator:
         Optional initial guess for the amplitude fit.
     force_C_normalized : bool, default ``False``
         If ``True``, force the fitted amplitude term to remain normalized.
+    model_fn : callable or None, default ``None``
+        Optional full fit model callable
+        ``model_fn(t, irf, period, *params, **model_kwargs)``. When omitted,
+        the default single-exponential ``C, dT, tau`` model is used.
+    p0, bounds, param_names, model_kwargs : optional
+        Initial values, bounds, names, and extra keyword arguments for
+        ``model_fn``. ``p0`` is required when ``model_fn`` is provided.
+    amplitude_param, delay_param, lifetime_param : str
+        Parameter names used to populate legacy output datasets. Custom HDF5
+        calibration requires ``delay_param`` to be present so common-delay
+        correction can still be computed.
     irf_iterations : int, default ``300``
         Number of iterations used when estimating the IRF from the reference
         data.
@@ -158,6 +169,14 @@ class H5DataCalibrator:
         initial_dT=None,
         initial_C=None,
         force_C_normalized=False,
+        model_fn=None,
+        p0=None,
+        bounds=None,
+        param_names=None,
+        model_kwargs=None,
+        amplitude_param="C",
+        delay_param="dT",
+        lifetime_param="tau",
         irf_iterations=DEFAULT_IRF_ITERATIONS,
         eps=1e-8,
         regularization=DEFAULT_REGULARIZATION,
@@ -187,6 +206,26 @@ class H5DataCalibrator:
         self.initial_dT = initial_dT
         self.initial_C = initial_C
         self.force_C_normalized = force_C_normalized
+        self.model_fn = model_fn
+        self.p0 = p0
+        self.bounds = bounds
+        self.model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
+        self.amplitude_param = str(amplitude_param)
+        self.delay_param = str(delay_param)
+        self.lifetime_param = str(lifetime_param)
+        _, self.param_names = Alignment._resolve_fit_setup(
+            self.model_fn,
+            self.p0,
+            param_names,
+            self.initial_C,
+            self.initial_dT,
+            self.initial_tau,
+        )
+        if self.model_fn is not None and self.delay_param not in self.param_names:
+            raise ValueError(
+                f"param_names must include delay_param={self.delay_param!r} "
+                "when model_fn is provided so calibration delays can be stored"
+            )
         self.irf_iterations = irf_iterations
         self.eps = eps
         self.regularization = regularization
@@ -581,7 +620,15 @@ class H5DataCalibrator:
         return float(np.sqrt(max(variance, 0.0)))
 
     @classmethod
-    def _parameter_error_payload(cls, covariance, dt_ns):
+    def _parameter_error_payload(
+        cls,
+        covariance,
+        dt_ns,
+        param_names=None,
+        amplitude_param="C",
+        delay_param="dT",
+        lifetime_param="tau",
+    ):
         errors = {
             "fit_param_C_err": np.nan,
             "tau_err_ns": np.nan,
@@ -589,13 +636,25 @@ class H5DataCalibrator:
             "fit_common_delay_err_in_ns": np.nan,
         }
         covariance = np.asarray(covariance, dtype=float)
-        if covariance.shape != (3, 3):
+        if param_names is None:
+            param_names = ["C", "dT", "tau"]
+        param_names = list(param_names)
+        if covariance.shape != (len(param_names), len(param_names)):
             return errors
 
         diag = np.diag(covariance)
-        errors["fit_param_C_err"] = cls._std_from_variance(diag[0])
-        errors["fit_common_delay_err_in_bins"] = cls._std_from_variance(diag[1])
-        errors["tau_err_ns"] = cls._std_from_variance(diag[2])
+        if amplitude_param in param_names:
+            errors["fit_param_C_err"] = cls._std_from_variance(
+                diag[param_names.index(amplitude_param)]
+            )
+        if delay_param in param_names:
+            errors["fit_common_delay_err_in_bins"] = cls._std_from_variance(
+                diag[param_names.index(delay_param)]
+            )
+        if lifetime_param in param_names:
+            errors["tau_err_ns"] = cls._std_from_variance(
+                diag[param_names.index(lifetime_param)]
+            )
         if np.isfinite(errors["fit_common_delay_err_in_bins"]) and np.isfinite(dt_ns):
             errors["fit_common_delay_err_in_ns"] = float(
                 errors["fit_common_delay_err_in_bins"] * float(dt_ns)
@@ -681,7 +740,11 @@ class H5DataCalibrator:
         data_for_fit_histogram,
         ref_for_fit_histogram,
         irf_type,
+        param_names=None,
     ):
+        if param_names is None:
+            param_names = ["C", "dT", "tau"]
+        param_count = len(param_names)
         zero_hist = np.zeros(int(nbin), dtype=float)
         payload = {
             "fit_param_C": np.nan,
@@ -697,6 +760,9 @@ class H5DataCalibrator:
             "data_for_fit": np.asarray(data_for_fit_histogram, dtype=float),
             "irf_for_fit": zero_hist.copy(),
             "data_fitted": zero_hist.copy(),
+            "fit_params": np.full(param_count, np.nan, dtype=float),
+            "fit_param_errs": np.full(param_count, np.nan, dtype=float),
+            "fit_covariance": np.full((param_count, param_count), np.nan, dtype=float),
             "irf_type": str(irf_type),
         }
         if reference_type == "ref":
@@ -924,6 +990,14 @@ class H5DataCalibrator:
                     "initial_dT": self.initial_dT,
                     "initial_C": self.initial_C,
                     "force_C_normalized": self.force_C_normalized,
+                    "fit_model_name": Alignment._callable_name(self.model_fn),
+                    "fit_param_names": json.dumps(self.param_names),
+                    "fit_p0": self.p0,
+                    "fit_bounds": self.bounds,
+                    "fit_model_kwargs": json.dumps(self.model_kwargs, default=str),
+                    "fit_amplitude_param": self.amplitude_param,
+                    "fit_delay_param": self.delay_param,
+                    "fit_lifetime_param": self.lifetime_param,
                     "channel_skew_type": self.channel_skew_type,
                     "channel_skew_source": self._channel_skew_source_attr_value(
                         self.channel_skew_source
@@ -997,6 +1071,14 @@ class H5DataCalibrator:
                         "initial_dT": self.initial_dT,
                         "initial_C": self.initial_C,
                         "force_C_normalized": self.force_C_normalized,
+                        "fit_model_name": Alignment._callable_name(self.model_fn),
+                        "fit_param_names": json.dumps(self.param_names),
+                        "fit_p0": self.p0,
+                        "fit_bounds": self.bounds,
+                        "fit_model_kwargs": json.dumps(self.model_kwargs, default=str),
+                        "fit_amplitude_param": self.amplitude_param,
+                        "fit_delay_param": self.delay_param,
+                        "fit_lifetime_param": self.lifetime_param,
                         "channel_skew_type": self.channel_skew_type,
                         "channel_skew_source": self._channel_skew_source_attr_value(
                             self.channel_skew_source
@@ -1039,6 +1121,9 @@ class H5DataCalibrator:
                 stacked_irf_for_fit = []
                 stacked_data_fitted = []
                 stacked_ref_for_fit = []
+                stacked_fit_params = []
+                stacked_fit_param_errs = []
+                stacked_fit_covariances = []
 
                 channel_iterator = tqdm(
                     channel_indices,
@@ -1071,6 +1156,7 @@ class H5DataCalibrator:
                             data_for_fit_histogram=data_for_fit_histogram,
                             ref_for_fit_histogram=ref_for_fit_histogram,
                             irf_type="skipped_zero_sum_data",
+                            param_names=self.param_names,
                         )
                     elif not np.isfinite(reference_sum) or reference_sum <= 0:
                         warnings.warn(
@@ -1088,6 +1174,7 @@ class H5DataCalibrator:
                             data_for_fit_histogram=data_for_fit_histogram,
                             ref_for_fit_histogram=ref_for_fit_histogram,
                             irf_type="skipped_zero_sum_reference",
+                            param_names=self.param_names,
                         )
                     else:
                         fit_kwargs = {
@@ -1103,6 +1190,14 @@ class H5DataCalibrator:
                             "initial_dT": self.initial_dT,
                             "initial_C": self.initial_C,
                             "force_C_normalized": self.force_C_normalized,
+                            "model_fn": self.model_fn,
+                            "p0": self.p0,
+                            "bounds": self.bounds,
+                            "param_names": self.param_names,
+                            "model_kwargs": self.model_kwargs,
+                            "amplitude_param": self.amplitude_param,
+                            "delay_param": self.delay_param,
+                            "lifetime_param": self.lifetime_param,
                             "irf_iterations": self.irf_iterations,
                             "eps": self.eps,
                             "regularization": self.regularization,
@@ -1120,6 +1215,10 @@ class H5DataCalibrator:
                             parameter_errors = self._parameter_error_payload(
                                 fit_result["cov"],
                                 dt_ns,
+                                param_names=fit_result["param_names"],
+                                amplitude_param=self.amplitude_param,
+                                delay_param=self.delay_param,
+                                lifetime_param=self.lifetime_param,
                             )
                             fit_payload = {
                                 "fit_param_C": float(fit_result["C"]),
@@ -1145,6 +1244,18 @@ class H5DataCalibrator:
                                 "data_for_fit": np.asarray(data_for_fit_histogram, dtype=float),
                                 "irf_for_fit": np.asarray(irf_for_fit, dtype=float),
                                 "data_fitted": data_fitted,
+                                "fit_params": np.asarray(
+                                    fit_result["param_values"],
+                                    dtype=float,
+                                ),
+                                "fit_param_errs": np.asarray(
+                                    fit_result["param_errors"],
+                                    dtype=float,
+                                ),
+                                "fit_covariance": np.asarray(
+                                    fit_result["cov"],
+                                    dtype=float,
+                                ),
                                 "irf_type": str(fit_result["irf_source"]),
                             }
                             if self.reference_type == "ref":
@@ -1167,6 +1278,7 @@ class H5DataCalibrator:
                                 data_for_fit_histogram=data_for_fit_histogram,
                                 ref_for_fit_histogram=ref_for_fit_histogram,
                                 irf_type="fit_failed",
+                                param_names=self.param_names,
                             )
 
                     stacked_channel_index.append(channel_index)
@@ -1193,6 +1305,13 @@ class H5DataCalibrator:
                     stacked_data_for_fit.append(np.asarray(fit_payload["data_for_fit"], dtype=float))
                     stacked_irf_for_fit.append(np.asarray(fit_payload["irf_for_fit"], dtype=float))
                     stacked_data_fitted.append(np.asarray(fit_payload["data_fitted"], dtype=float))
+                    stacked_fit_params.append(np.asarray(fit_payload["fit_params"], dtype=float))
+                    stacked_fit_param_errs.append(
+                        np.asarray(fit_payload["fit_param_errs"], dtype=float)
+                    )
+                    stacked_fit_covariances.append(
+                        np.asarray(fit_payload["fit_covariance"], dtype=float)
+                    )
                     if self.reference_type == "ref":
                         stacked_ref_for_fit.append(np.asarray(fit_payload["ref_for_fit"], dtype=float))
 
@@ -1252,6 +1371,9 @@ class H5DataCalibrator:
                     reference_fingerprint_for_output_channels,
                 )
                 data_fitted_stack = np.stack(stacked_data_fitted, axis=-1)
+                fit_params_array = np.stack(stacked_fit_params, axis=0)
+                fit_param_errs_array = np.stack(stacked_fit_param_errs, axis=0)
+                fit_covariances_array = np.stack(stacked_fit_covariances, axis=0)
 
                 self._replace_dataset(target_group, "channel_index", channel_index_array)
                 self._replace_dataset(
@@ -1319,6 +1441,17 @@ class H5DataCalibrator:
                     "data_fitted",
                     data_fitted_stack,
                 )
+                string_dtype = h5py.string_dtype(encoding="utf-8")
+                if "fit_param_names" in target_group:
+                    del target_group["fit_param_names"]
+                target_group.create_dataset(
+                    "fit_param_names",
+                    data=np.asarray(self.param_names, dtype=object),
+                    dtype=string_dtype,
+                )
+                self._replace_dataset(target_group, "fit_params", fit_params_array)
+                self._replace_dataset(target_group, "fit_param_errs", fit_param_errs_array)
+                self._replace_dataset(target_group, "fit_covariances", fit_covariances_array)
 
                 channel_skew_sources = {
                     "data": data_for_fit_stack,
@@ -1429,6 +1562,14 @@ def calibrate_h5_file(
     channel_skew_fit_upsampling=DEFAULT_CHANNEL_SKEW_FIT_UPSAMPLING,
     channel_skew_fit_apodize=DEFAULT_CHANNEL_SKEW_FIT_APODIZE,
     overwrite=DEFAULT_OVERWRITE,
+    model_fn=None,
+    p0=None,
+    bounds=None,
+    param_names=None,
+    model_kwargs=None,
+    amplitude_param="C",
+    delay_param="dT",
+    lifetime_param="tau",
     **kwargs,
 ):
     """
@@ -1496,6 +1637,9 @@ def calibrate_h5_file(
         Apodization flag forwarded to the local channel-skew estimator.
     overwrite : bool, default ``True``
         If ``True``, overwrite an existing output file.
+    model_fn, p0, bounds, param_names, model_kwargs : optional
+        Optional custom full-model fit configuration. ``model_fn`` receives
+        ``(t, irf, period, *params)`` and returns the fitted histogram.
     **kwargs
         Additional keyword arguments forwarded to
         :class:`H5DataCalibrator`, including ``output_path=None``,
@@ -1529,6 +1673,14 @@ def calibrate_h5_file(
         channel_skew_fit_upsampling=channel_skew_fit_upsampling,
         channel_skew_fit_apodize=channel_skew_fit_apodize,
         overwrite=overwrite,
+        model_fn=model_fn,
+        p0=p0,
+        bounds=bounds,
+        param_names=param_names,
+        model_kwargs=model_kwargs,
+        amplitude_param=amplitude_param,
+        delay_param=delay_param,
+        lifetime_param=lifetime_param,
         **kwargs,
     ).calibrate()
 
