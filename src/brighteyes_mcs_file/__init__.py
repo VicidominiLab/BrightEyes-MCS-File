@@ -9,6 +9,11 @@ from .h5_data_calibrator import (
     show_h5_structure,
     show_h5_structure_html,
 )
+from .h5_output_builder import (
+    H5OutputBuilder,
+    add_output_to_h5_file,
+    build_h5_output,
+)
 from .graph import (
     normalize_histogram,
     plot_calibration_fit_traces,
@@ -42,8 +47,11 @@ clean_irf_stack = Alignment.clean_irf_stack
 __all__ = [
     "Alignment",
     "H5DataCalibrator",
+    "H5OutputBuilder",
     "IRF_from_data_deconvolution",
     "MCSMetadata",
+    "add_output_to_h5_file",
+    "build_h5_output",
     "calibrate_h5_file",
     "centroid",
     "clean_irf",
