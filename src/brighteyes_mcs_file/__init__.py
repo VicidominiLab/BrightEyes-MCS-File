@@ -5,14 +5,12 @@ from .alignment import Alignment
 from .channel_skew_estimator import estimate_channel_skew
 from .h5_data_calibrator import (
     H5DataCalibrator,
-    calibrate_h5_file,
-    show_h5_structure,
-    show_h5_structure_html,
-)
-from .h5_output_builder import (
     H5OutputBuilder,
     add_output_to_h5_file,
     build_h5_output,
+    calibrate_h5_file,
+    show_h5_structure,
+    show_h5_structure_html,
 )
 from .graph import (
     normalize_histogram,

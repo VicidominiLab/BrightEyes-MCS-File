@@ -24,9 +24,19 @@ from brighteyes_mcs_file import (
 )
 
 metadata = metadata_load("data.h5")
-output_path = calibrate_h5_file("data.h5", "reference.h5")
+output_path = calibrate_h5_file("data.h5", "reference.h5", create_output=True)
 show_h5_structure_html(output_path)
 ```
+
+Set `create_output=False` to write only the calibration results without the
+derived `/output` analysis group.
+
+Calibrated files are written with the BrightEyes MCS 0.0.6 root layout. The
+root contains `/raw`, `/calibration`, `/output`, and optional `/thumbnail`;
+legacy input `/data` is copied to `/raw/spad`, legacy
+`/data_channels_extra` is copied to `/raw/aux`, and old configuration groups
+are preserved under `/raw/legacy`. Routine analysis metadata is normalized
+under `/raw/metadata`, `/calibration/metadata`, and `/output/<run>/metadata`.
 
 ## Custom Fit Models
 
@@ -47,14 +57,14 @@ result = calibrate_h5_file(
     model_fn=biexponential_model,
     p0=[1.0, 0.0, 0.5, 1.5, 4.0],
     bounds=([0.0, -45.5, 0.0, 0.01, 0.01], [float("inf"), 45.5, 1.0, 25.0, 25.0]),
-    param_names=["C", "dT", "a1", "tau1", "tau2"],
+    parameter_names=["C", "dT", "a1", "tau1", "tau2"],
     lifetime_param="tau1",
 )
 ```
 
 Custom calibration outputs keep the legacy datasets when possible and also add
-generic `fit_param_names`, `fit_params`, `fit_param_errs`, and
-`fit_covariances` datasets.
+generic `fit_parameter_names`, `fit_params`, `fit_parameter_errors`, and
+`fit_covariance` datasets.
 
 The same model configuration can be used for pixel-wise fit maps:
 
@@ -67,7 +77,7 @@ fit_maps = Alignment.generate_fit_maps(
     model_fn=biexponential_model,
     p0=[1.0, 0.0, 0.5, 1.5, 4.0],
     bounds=([0.0, -45.5, 0.0, 0.01, 0.01], [float("inf"), 45.5, 1.0, 25.0, 25.0]),
-    param_names=["C", "dT", "a1", "tau1", "tau2"],
+    parameter_names=["C", "dT", "a1", "tau1", "tau2"],
     lifetime_param="tau1",
 )
 

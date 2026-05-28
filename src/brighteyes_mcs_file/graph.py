@@ -211,8 +211,8 @@ def plot_calibration_lifetime_summary(summary_table, fig=None, histogram_lifetim
     channels = _column(summary_table, "channel")
     tau = _column(summary_table, "tau_ns").astype(float)
     tau_err = _column(summary_table, "tau_err_ns").astype(float)
-    tau_ref = _column(summary_table, "tau_ref_ns").astype(float)
-    fit_error = _column(summary_table, "fit_error").astype(float)
+    tau_ref = _column(summary_table, "tau_reference_ns").astype(float)
+    residual_error = _column(summary_table, "residual_error").astype(float)
 
     if fig is None:
         fig = plt.figure(figsize=(12, 6), constrained_layout=True)
@@ -261,16 +261,16 @@ def plot_calibration_lifetime_summary(summary_table, fig=None, histogram_lifetim
         ax_hist.tick_params(axis="y", labelleft=False, labelright=False)
         ax_hist.set_ylabel("")
 
-    ax_error.plot(channels, fit_error, "o-", color="tab:red", linewidth=1.8, markersize=5)
+    ax_error.plot(channels, residual_error, "o-", color="tab:red", linewidth=1.8, markersize=5)
     ax_error.set_xlabel("Channel")
     ax_error.set_ylabel("Fit RMSE")
     ax_error.grid(True, alpha=0.3)
 
-    fit_error_bins = min(20, max(5, np.count_nonzero(np.isfinite(fit_error))))
+    residual_error_bins = min(20, max(5, np.count_nonzero(np.isfinite(residual_error))))
     _plot_vertical_value_histogram(
-        fit_error,
+        residual_error,
         ax_error_hist,
-        bins=fit_error_bins,
+        bins=residual_error_bins,
         color="tab:red",
     )
     ax_error_hist.set_xlabel("Channel count")
@@ -324,10 +324,10 @@ def plot_calibration_shift_summary(summary_tables, labels=None, reference_channe
     for table, label in zip(summary_tables, labels):
         channels = _column(table, "channel")
         channel_skew = _column(table, "channel_skew").astype(float)
-        channel_skew_err = _column(table, "channel_skew_est_err").astype(float)
-        common_delay = _column(table, "common_delay_in_ns").astype(float)
-        fit_common_delay = _column(table, "fit_common_delay_in_ns").astype(float)
-        fit_common_delay_err = _column(table, "fit_common_delay_err_in_ns").astype(float)
+        channel_skew_err = _column(table, "channel_skew_err").astype(float)
+        delay_correction = _column(table, "delay_correction_ns").astype(float)
+        fitted_delay = _column(table, "fitted_delay_ns").astype(float)
+        fitted_delay_err = _column(table, "fitted_delay_err_ns").astype(float)
 
         shift_container = ax_shift.errorbar(
             channels,
@@ -341,28 +341,28 @@ def plot_calibration_shift_summary(summary_tables, labels=None, reference_channe
         )
         delay_container = ax_delay.errorbar(
             channels,
-            common_delay,
-            yerr=fit_common_delay_err,
+            delay_correction,
+            yerr=fitted_delay_err,
             fmt="o--",
             linewidth=2,
             markersize=5,
             capsize=3,
-            label=label,
+            label=f"{label} correction",
         )
         delay_container = ax_delay.errorbar(
             channels,
-            fit_common_delay,
-            yerr=fit_common_delay_err,
+            fitted_delay,
+            yerr=fitted_delay_err,
             fmt="o--",
             linewidth=2,
             markersize=5,
             capsize=3,
-            label=label,
+            label=f"{label} fitted",
         )
         shift_color = shift_container.lines[0].get_color()
         delay_color = delay_container.lines[0].get_color()
         shift_bins = min(20, max(5, np.count_nonzero(np.isfinite(channel_skew))))
-        delay_bins = min(20, max(5, np.count_nonzero(np.isfinite(fit_common_delay))))
+        delay_bins = min(20, max(5, np.count_nonzero(np.isfinite(fitted_delay))))
         _plot_vertical_value_histogram(
             channel_skew,
             ax_shift_hist,
@@ -373,7 +373,7 @@ def plot_calibration_shift_summary(summary_tables, labels=None, reference_channe
             show_stats=True,
         )
         _plot_vertical_value_histogram(
-            fit_common_delay,
+            fitted_delay,
             ax_delay_hist,
             bins=delay_bins,
             color=delay_color,
@@ -402,8 +402,8 @@ def plot_calibration_shift_summary(summary_tables, labels=None, reference_channe
 
     ax_delay.axhline(0, color="0.85", linestyle="--", linewidth=1)
     ax_delay.set_xlabel("Channel")
-    ax_delay.set_ylabel("Common delay (ns)")
-    ax_delay.set_title("Fitted common delay")
+    ax_delay.set_ylabel("Delay (ns)")
+    ax_delay.set_title("Fitted and correction delay")
     ax_delay.grid(True, alpha=0.3)
     ax_delay.legend(loc="best")
     ax_delay_hist.axhline(0, color="0.85", linestyle="--", linewidth=1)
@@ -426,12 +426,12 @@ def plot_calibration_fit_traces(t, traces, title=None, ax=None, log_scale=True):
     t = np.asarray(t, dtype=float)
 
     default_styles = {
-        "data_for_fit": ("tab:blue", 1.0, 2.0),
-        "ref_for_fit": ("tab:purple", 0.35, 1.5),
-        "ref_common_delay_realigned": ("tab:purple", 0.9, 1.8),
-        "irf_for_fit": ("tab:green", 0.35, 1.5),
-        "irf_common_delay_realigned": ("tab:green", 0.9, 1.8),
-        "data_fitted": ("tab:red", 1.0, 2.0),
+        "measured_trace": ("tab:blue", 1.0, 2.0),
+        "reference_trace": ("tab:purple", 0.35, 1.5),
+        "aligned_reference_trace": ("tab:purple", 0.9, 1.8),
+        "irf_trace": ("tab:green", 0.35, 1.5),
+        "aligned_irf_trace": ("tab:green", 0.9, 1.8),
+        "fitted_trace": ("tab:red", 1.0, 2.0),
     }
 
     for name, values in traces.items():

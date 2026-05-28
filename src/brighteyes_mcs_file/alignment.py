@@ -492,12 +492,12 @@ class Alignment:
         ref_hist = Alignment.to_torch_1d(ref_data, dtype=torch.float64)
         t_ns = Alignment.to_numpy_1d(t, dtype=float)
         C_ref = float(C_R)
-        tau_ref_ns = float(tau_R)
+        tau_reference_ns = float(tau_R)
         period_ns = float(period)
 
         irf_est = torch.ones_like(ref_hist)
 
-        kernel = Alignment.to_torch_1d(Alignment.model_data(t=t_ns, C=C_ref, tau=tau_ref_ns, period=period_ns))
+        kernel = Alignment.to_torch_1d(Alignment.model_data(t=t_ns, C=C_ref, tau=tau_reference_ns, period=period_ns))
 
         kernel_t = kernel.clone().flip(0)
 
@@ -617,6 +617,7 @@ class Alignment:
         model_fn=None,
         p0=None,
         bounds=None,
+        parameter_names=None,
         param_names=None,
         model_kwargs=None,
         amplitude_param="C",
@@ -660,7 +661,7 @@ class Alignment:
             Optionally returns an additional shifted histogram:
             - ``"ref"`` / ``"reference"`` returns ``ref_shifted`` using ``+dT``.
             - ``"data"`` returns ``data_shifted`` using ``-dT``.
-        model_fn, p0, bounds, param_names, model_kwargs : optional
+        model_fn, p0, bounds, parameter_names, model_kwargs : optional
             Optional custom full-model fit configuration forwarded to
             ``perform_fit_data``. ``model_fn`` receives
             ``(t, irf, period, *params)`` and returns the fitted histogram.
@@ -679,7 +680,7 @@ class Alignment:
             - ``fit``: fitted histogram
             - ``cov``: covariance matrix from ``perform_fit_data``
             - ``irf_source``: ``"estimated_from_ref"`` or ``"provided"``
-            - ``param_names``, ``param_values``, ``param_errors``, and
+            - ``parameter_names``, ``param_values``, ``param_errors``, and
               ``params``: generic parameter outputs for default and custom fits
             When requested, the dictionary also includes ``ref_shifted`` or
             ``data_shifted``.
@@ -688,6 +689,7 @@ class Alignment:
             unit sum. This function does not return unnormalized ``data``,
             ``ref``, or ``irf`` histograms.
         """
+        parameter_names = Alignment._resolve_parameter_names_alias(parameter_names, param_names)
         t_ns = Alignment.to_numpy_1d(t, dtype=float)
         data_hist = Alignment.to_numpy_1d(data, dtype=float)
 
@@ -717,7 +719,7 @@ class Alignment:
         if shift_output not in {None, "ref", "data"}:
             raise ValueError("shift_output must be None, 'ref', 'reference', or 'data'")
 
-        used_tau_ref_ns = None
+        used_tau_reference_ns = None
 
         if irf is None:
             ref_hist = Alignment.to_numpy_1d(ref, dtype=float)
@@ -732,7 +734,7 @@ class Alignment:
                 tau_ref_mode = None
 
             if tau_ref_mode is None:
-                tau_ref_ns = float(tau_ref)
+                tau_reference_ns = float(tau_ref)
             elif tau_ref_mode in {"log", "estimate_lifetime_from_log"}:
                 tau_ref_result = estimate_lifetime_from_log(
                     data_hist=ref_hist,
@@ -741,34 +743,34 @@ class Alignment:
                     nbin=len(t_ns),
                     period_ns=period_ns,
                 )
-                tau_ref_ns = tau_ref_result[0]
+                tau_reference_ns = tau_ref_result[0]
             elif tau_ref_mode in {"circmean", "estimate_lifetime_from_circmean"}:
                 repetition_rate_MHz = 1e3 / period_ns
                 t0_ns = float((int(np.argmax(ref_hist)) + 0.5) * dt_ns)
-                tau_ref_ns = estimate_lifetime_from_circmean(
+                tau_reference_ns = estimate_lifetime_from_circmean(
                     ref_hist,
                     t0_ns=t0_ns,
                     repetition_rate_MHz=repetition_rate_MHz,
                 )
             elif tau_ref_mode in {"birfi", "estimate_lifetime_from_birfi"}:
-                tau_ref_ns = estimate_lifetime_from_birfi(t_ns, ref_hist)
+                tau_reference_ns = estimate_lifetime_from_birfi(t_ns, ref_hist)
             else:
                 try:
-                    tau_ref_ns = float(tau_ref)
+                    tau_reference_ns = float(tau_ref)
                 except (TypeError, ValueError) as exc:
                     raise ValueError(
                         "tau_ref must be a float, None, 'log', 'circmean', or 'birfi'"
                     ) from exc
 
-            if tau_ref_ns is None:
+            if tau_reference_ns is None:
                 raise ValueError("unable to estimate tau_ref from ref")
-            tau_ref_ns_array = np.asarray(tau_ref_ns, dtype=float)
-            if tau_ref_ns_array.size != 1:
+            tau_reference_ns_array = np.asarray(tau_reference_ns, dtype=float)
+            if tau_reference_ns_array.size != 1:
                 raise ValueError("tau_ref estimator must return a scalar lifetime")
-            tau_ref_ns = float(tau_ref_ns_array.reshape(-1)[0])
-            if not np.isfinite(tau_ref_ns) or tau_ref_ns <= 0:
+            tau_reference_ns = float(tau_reference_ns_array.reshape(-1)[0])
+            if not np.isfinite(tau_reference_ns) or tau_reference_ns <= 0:
                 raise ValueError("unable to estimate a valid positive tau_ref from ref")
-            used_tau_ref_ns = tau_ref_ns
+            used_tau_reference_ns = tau_reference_ns
 
             ref_hist_norm = Alignment._normalize_histogram_1d(ref_hist, name="ref")
             irf_hist = np.asarray(
@@ -776,7 +778,7 @@ class Alignment:
                     ref_hist_norm,
                     t_ns,
                     C_ref,
-                    tau_ref_ns,
+                    tau_reference_ns,
                     period_ns,
                     iterations=irf_iterations,
                     eps=eps,
@@ -808,7 +810,7 @@ class Alignment:
             model_fn=model_fn,
             p0=p0,
             bounds=bounds,
-            param_names=param_names,
+            parameter_names=parameter_names,
             model_kwargs=model_kwargs,
             amplitude_param=amplitude_param,
             delay_param=delay_param,
@@ -840,7 +842,7 @@ class Alignment:
 
         result = {
             "C": C_value,
-            "tau_ref": used_tau_ref_ns,
+            "tau_ref": used_tau_reference_ns,
             "dT": dT_bins,
             "dT_ns": dT_bins * dt_ns,
             "tau": tau_ns,
@@ -849,7 +851,8 @@ class Alignment:
             "cov": fit_cov,
             "irf_source": irf_source,
             "params": dict(fit_result.get("params", {})),
-            "param_names": list(fit_result.get("param_names", [])),
+            "parameter_names": list(fit_result.get("parameter_names", [])),
+            "param_names": list(fit_result.get("parameter_names", [])),
             "param_values": np.asarray(fit_result.get("param_values", []), dtype=float),
             "param_errors": np.asarray(fit_result.get("param_errors", []), dtype=float),
             "model_name": fit_result.get("model_name", Alignment._callable_name(model_fn)),
@@ -980,35 +983,36 @@ class Alignment:
         )
 
     @staticmethod
-    def _nan_fit_result(param_names=None, dt_ns=np.nan):
-        if param_names is None:
-            param_names = ["C", "dT", "tau"]
-        param_names = list(param_names)
-        values = np.full(len(param_names), np.nan, dtype=float)
-        errors = np.full(len(param_names), np.nan, dtype=float)
-        params = {name: value for name, value in zip(param_names, values)}
+    def _nan_fit_result(parameter_names=None, dt_ns=np.nan):
+        if parameter_names is None:
+            parameter_names = ["C", "dT", "tau"]
+        parameter_names = list(parameter_names)
+        values = np.full(len(parameter_names), np.nan, dtype=float)
+        errors = np.full(len(parameter_names), np.nan, dtype=float)
+        params = {name: value for name, value in zip(parameter_names, values)}
         result = {
             "C": params.get("C", np.nan),
             "dT": params.get("dT", np.nan),
             "dT_ns": params.get("dT", np.nan) * float(dt_ns),
             "tau": params.get("tau", np.nan),
             "params": params,
-            "param_names": param_names,
+            "parameter_names": parameter_names,
+            "param_names": parameter_names,
             "param_values": values,
             "param_errors": errors,
             "fit": None,
         }
-        return result, np.full((len(param_names), len(param_names)), np.nan, dtype=float)
+        return result, np.full((len(parameter_names), len(parameter_names)), np.nan, dtype=float)
 
     @staticmethod
-    def _skip_fit_with_warning(histogram_name, param_names=None, dt_ns=np.nan):
+    def _skip_fit_with_warning(histogram_name, parameter_names=None, dt_ns=np.nan):
         warnings.warn(
             f"{histogram_name} histogram has a non-positive or non-finite sum; "
             "skipping fit and returning NaNs",
             RuntimeWarning,
             stacklevel=3,
         )
-        return Alignment._nan_fit_result(param_names=param_names, dt_ns=dt_ns)
+        return Alignment._nan_fit_result(parameter_names=parameter_names, dt_ns=dt_ns)
 
     @staticmethod
     def _canonical_fit_type(fit_type):
@@ -1041,6 +1045,14 @@ class Alignment:
         return fit_type_aliases[fit_type]
 
     @staticmethod
+    def _resolve_parameter_names_alias(parameter_names, param_names):
+        if param_names is None:
+            return parameter_names
+        if parameter_names is not None and list(parameter_names) != list(param_names):
+            raise ValueError("parameter_names and param_names cannot disagree")
+        return param_names
+
+    @staticmethod
     def _fit_initial_guess(initial_C, initial_dT, initial_tau):
         initial_guess = [1.0, 0.0, 1.0]
         if initial_C is not None:
@@ -1062,7 +1074,7 @@ class Alignment:
         )
 
     @staticmethod
-    def _infer_model_param_names(model_fn, n_params):
+    def _infer_model_parameter_names(model_fn, n_params):
         try:
             signature = inspect.signature(model_fn)
         except (TypeError, ValueError):
@@ -1080,30 +1092,30 @@ class Alignment:
         return None
 
     @staticmethod
-    def _normalize_param_names(param_names, n_params, model_fn=None):
+    def _normalize_parameter_names(parameter_names, n_params, model_fn=None):
         n_params = int(n_params)
-        if param_names is None:
+        if parameter_names is None:
             if model_fn is None and n_params == 3:
-                param_names = ["C", "dT", "tau"]
+                parameter_names = ["C", "dT", "tau"]
             else:
-                param_names = Alignment._infer_model_param_names(model_fn, n_params)
-                if param_names is None:
-                    param_names = [f"p{idx}" for idx in range(n_params)]
+                parameter_names = Alignment._infer_model_parameter_names(model_fn, n_params)
+                if parameter_names is None:
+                    parameter_names = [f"p{idx}" for idx in range(n_params)]
 
-        param_names = [str(name) for name in param_names]
-        if len(param_names) != n_params:
+        parameter_names = [str(name) for name in parameter_names]
+        if len(parameter_names) != n_params:
             raise ValueError(
-                f"param_names must contain {n_params} names, got {len(param_names)}"
+                f"parameter_names must contain {n_params} names, got {len(parameter_names)}"
             )
-        if len(set(param_names)) != len(param_names):
-            raise ValueError("param_names must not contain duplicates")
-        return param_names
+        if len(set(parameter_names)) != len(parameter_names):
+            raise ValueError("parameter_names must not contain duplicates")
+        return parameter_names
 
     @staticmethod
     def _resolve_fit_setup(
         model_fn,
         p0,
-        param_names,
+        parameter_names,
         initial_C,
         initial_dT,
         initial_tau,
@@ -1120,8 +1132,8 @@ class Alignment:
         if not np.all(np.isfinite(p0_array)):
             raise ValueError("p0 must contain only finite values")
 
-        names = Alignment._normalize_param_names(
-            param_names,
+        names = Alignment._normalize_parameter_names(
+            parameter_names,
             len(p0_array),
             model_fn=model_fn,
         )
@@ -1131,7 +1143,7 @@ class Alignment:
     def _normalize_fit_bounds(
         bounds,
         n_params,
-        param_names,
+        parameter_names,
         nbin,
         tau_lower_bound,
         tau_upper_bound,
@@ -1151,7 +1163,7 @@ class Alignment:
         if np.any(lb > ub):
             raise ValueError("each lower bound must be <= the corresponding upper bound")
 
-        for idx, name in enumerate(param_names):
+        for idx, name in enumerate(parameter_names):
             if name == amplitude_param and not np.isfinite(lb[idx]):
                 lb[idx] = 0.0
             if name == delay_param:
@@ -1168,15 +1180,15 @@ class Alignment:
         return lb, ub
 
     @staticmethod
-    def _fit_active_state(p0, bounds, param_names, force_C_normalized, amplitude_param):
+    def _fit_active_state(p0, bounds, parameter_names, force_C_normalized, amplitude_param):
         p0 = np.asarray(p0, dtype=float).copy()
         lb, ub = bounds
         lb = np.asarray(lb, dtype=float).copy()
         ub = np.asarray(ub, dtype=float).copy()
         active_mask = np.ones(p0.shape, dtype=bool)
 
-        if force_C_normalized and amplitude_param in param_names:
-            amp_idx = param_names.index(amplitude_param)
+        if force_C_normalized and amplitude_param in parameter_names:
+            amp_idx = parameter_names.index(amplitude_param)
             p0[amp_idx] = 1.0
             active_mask[amp_idx] = False
 
@@ -1543,6 +1555,7 @@ class Alignment:
         model_fn=None,
         p0=None,
         bounds=None,
+        parameter_names=None,
         param_names=None,
         model_kwargs=None,
         amplitude_param="C",
@@ -1577,6 +1590,7 @@ class Alignment:
           return a 1D fitted histogram in the same normalized units as
           ``data / data.sum()``. ``p0`` is required for custom models.
         """
+        parameter_names = Alignment._resolve_parameter_names_alias(parameter_names, param_names)
         t_ns = Alignment.to_numpy_1d(t, dtype=float)
         data_hist = Alignment.to_numpy_1d(data, dtype=float)
         irf_hist = Alignment.to_numpy_1d(irf, dtype=float)
@@ -1618,10 +1632,10 @@ class Alignment:
         tau_upper_bound = t_ns.max()
 
         if custom_model:
-            p0_full, resolved_param_names = Alignment._resolve_fit_setup(
+            p0_full, resolved_parameter_names = Alignment._resolve_fit_setup(
                 model_fn,
                 p0,
-                param_names,
+                parameter_names,
                 initial_C,
                 initial_dT,
                 initial_tau,
@@ -1644,10 +1658,10 @@ class Alignment:
                 irf_hist_norm,
                 seed_initial_dT,
             )
-            p0_full, resolved_param_names = Alignment._resolve_fit_setup(
+            p0_full, resolved_parameter_names = Alignment._resolve_fit_setup(
                 None,
                 p0,
-                param_names,
+                parameter_names,
                 initial_C,
                 fit_initial_dT,
                 initial_tau,
@@ -1666,7 +1680,7 @@ class Alignment:
         lb, ub = Alignment._normalize_fit_bounds(
             bounds,
             len(p0_full),
-            resolved_param_names,
+            resolved_parameter_names,
             nbin,
             tau_lower_bound,
             tau_upper_bound,
@@ -1677,14 +1691,14 @@ class Alignment:
         p0_full, lb, ub, active_mask = Alignment._fit_active_state(
             p0_full,
             (lb, ub),
-            resolved_param_names,
+            resolved_parameter_names,
             force_C_normalized,
             amplitude_param,
         )
 
         circular_params = {}
-        if delay_param in resolved_param_names:
-            delay_idx = resolved_param_names.index(delay_param)
+        if delay_param in resolved_parameter_names:
+            delay_idx = resolved_parameter_names.index(delay_param)
             if np.isfinite(lb[delay_idx]) and np.isfinite(ub[delay_idx]):
                 circular_params[delay_idx] = float(ub[delay_idx] - lb[delay_idx])
 
@@ -1720,7 +1734,7 @@ class Alignment:
         param_errors = Alignment._fit_param_errors(cov, len(popt))
         params = {
             name: float(value)
-            for name, value in zip(resolved_param_names, np.asarray(popt, dtype=float))
+            for name, value in zip(resolved_parameter_names, np.asarray(popt, dtype=float))
         }
 
         if custom_model:
@@ -1750,7 +1764,8 @@ class Alignment:
             "dT_ns": delay_value * dt_ns,
             "tau": params.get(lifetime_param, np.nan),
             "params": params,
-            "param_names": list(resolved_param_names),
+            "parameter_names": list(resolved_parameter_names),
+            "param_names": list(resolved_parameter_names),
             "param_values": np.asarray(popt, dtype=float),
             "param_errors": param_errors,
             "fit": fitted_hist,
@@ -1787,6 +1802,7 @@ class Alignment:
         model_fn,
         p0,
         bounds,
+        parameter_names,
         param_names,
         model_kwargs,
         amplitude_param,
@@ -1813,6 +1829,7 @@ class Alignment:
                 model_fn=model_fn,
                 p0=p0,
                 bounds=bounds,
+                parameter_names=parameter_names,
                 param_names=param_names,
                 model_kwargs=model_kwargs,
                 amplitude_param=amplitude_param,
@@ -1829,7 +1846,8 @@ class Alignment:
         except Exception:
             if not catch_exceptions:
                 raise
-            param_count = len(param_names) if param_names is not None else 3
+            resolved_names = Alignment._resolve_parameter_names_alias(parameter_names, param_names)
+            param_count = len(resolved_names) if resolved_names is not None else 3
             return (
                 y,
                 x,
@@ -1888,6 +1906,7 @@ class Alignment:
         model_fn=None,
         p0=None,
         bounds=None,
+        parameter_names=None,
         param_names=None,
         model_kwargs=None,
         amplitude_param="C",
@@ -1901,7 +1920,7 @@ class Alignment:
         ``*_err`` maps. The default model keeps the historical ``C``, ``dT``,
         ``tau``, ``C_err``, ``dT_err``, and ``tau_err`` maps. Custom models use
         ``model_fn(t, irf, period, *params, **model_kwargs)`` and return maps
-        named by ``param_names`` or by the custom function signature. Invalid
+        named by ``parameter_names`` or by the custom function signature. Invalid
         or failed pixels are filled with NaNs.
 
         ``min_counts``, ``min_peak_counts``, ``min_nonzero_bins``, and
@@ -1915,6 +1934,7 @@ class Alignment:
         while custom models fit their amplitude parameter unless explicitly
         forced with ``force_C_normalized=True``.
         """
+        parameter_names = Alignment._resolve_parameter_names_alias(parameter_names, param_names)
         data_array = np.asarray(data, dtype=float)
         irf_hist = Alignment.to_numpy_1d(irf, dtype=float)
         t_ns = Alignment.to_numpy_1d(t, dtype=float)
@@ -1937,19 +1957,19 @@ class Alignment:
         )
 
         if model_fn is not None:
-            p0_full, resolved_param_names = Alignment._resolve_fit_setup(
+            p0_full, resolved_parameter_names = Alignment._resolve_fit_setup(
                 model_fn,
                 p0,
-                param_names,
+                parameter_names,
                 initial_C,
                 initial_dT,
                 initial_tau,
             )
         else:
-            p0_full, resolved_param_names = Alignment._resolve_fit_setup(
+            p0_full, resolved_parameter_names = Alignment._resolve_fit_setup(
                 None,
                 p0,
-                param_names,
+                parameter_names,
                 initial_C,
                 initial_dT,
                 initial_tau,
@@ -1976,8 +1996,11 @@ class Alignment:
 
         valid_indices = np.flatnonzero(pixel_is_valid)
 
-        fit_maps = {"param_names": list(resolved_param_names)}
-        for name in resolved_param_names:
+        fit_maps = {
+            "parameter_names": list(resolved_parameter_names),
+            "param_names": list(resolved_parameter_names),
+        }
+        for name in resolved_parameter_names:
             fit_maps[name] = np.full((ny, nx), np.nan, dtype=float)
             fit_maps[f"{name}_err"] = np.full((ny, nx), np.nan, dtype=float)
 
@@ -1999,7 +2022,8 @@ class Alignment:
             model_fn=model_fn,
             p0=p0_full if model_fn is not None else p0,
             bounds=bounds,
-            param_names=resolved_param_names,
+            parameter_names=resolved_parameter_names,
+            param_names=None,
             model_kwargs=model_kwargs,
             amplitude_param=amplitude_param,
             delay_param=delay_param,
@@ -2040,7 +2064,7 @@ class Alignment:
         for y, x, values, errors in results:
             values = np.asarray(values, dtype=float)
             errors = np.asarray(errors, dtype=float)
-            for param_idx, name in enumerate(resolved_param_names):
+            for param_idx, name in enumerate(resolved_parameter_names):
                 fit_maps[name][y, x] = values[param_idx] if param_idx < values.size else np.nan
                 fit_maps[f"{name}_err"][y, x] = (
                     errors[param_idx] if param_idx < errors.size else np.nan
@@ -2052,7 +2076,14 @@ class Alignment:
     def fit_maps_to_stack(fit_maps, names=None):
         """Return a stack and name list from a fit-map dictionary."""
         if names is None:
-            if "param_names" in fit_maps:
+            if "parameter_names" in fit_maps:
+                parameter_names = list(fit_maps["parameter_names"])
+                names = parameter_names + [
+                    f"{name}_err"
+                    for name in parameter_names
+                    if f"{name}_err" in fit_maps
+                ]
+            elif "param_names" in fit_maps:
                 param_names = list(fit_maps["param_names"])
                 names = param_names + [
                     f"{name}_err"
