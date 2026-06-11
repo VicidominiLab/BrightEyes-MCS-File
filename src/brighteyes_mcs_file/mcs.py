@@ -16,6 +16,9 @@ DATASET_KEY_ALIASES = {
     "data_channels_extra": ("raw/aux", "data_channels_extra"),
     "aux": ("raw/aux", "data_channels_extra"),
     "raw/aux": ("raw/aux",),
+    "data_analog": ("raw/analog", "data_analog"),
+    "analog": ("raw/analog", "data_analog"),
+    "raw/analog": ("raw/analog",),
 }
 
 

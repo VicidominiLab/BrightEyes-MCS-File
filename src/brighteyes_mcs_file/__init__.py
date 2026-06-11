@@ -12,6 +12,14 @@ from .h5_data_calibrator import (
     show_h5_structure,
     show_h5_structure_html,
 )
+from .h5_output_loaders import (
+    load_default_irf,
+    load_default_output_spad,
+    load_default_ref,
+    load_raw,
+    load_virtual_channel,
+)
+from .h5_output_writers import H5OutputProduct, write_h5_output_run
 from .graph import (
     normalize_histogram,
     plot_calibration_fit_traces,
@@ -46,6 +54,7 @@ __all__ = [
     "Alignment",
     "H5DataCalibrator",
     "H5OutputBuilder",
+    "H5OutputProduct",
     "IRF_from_data_deconvolution",
     "MCSMetadata",
     "add_output_to_h5_file",
@@ -66,6 +75,11 @@ __all__ = [
     "hist_for_plot",
     "linear_shift",
     "load",
+    "load_default_irf",
+    "load_default_output_spad",
+    "load_default_ref",
+    "load_raw",
+    "load_virtual_channel",
     "mcs",
     "metadata",
     "metadata_load",
@@ -81,4 +95,5 @@ __all__ = [
     "show_h5_structure",
     "show_h5_structure_html",
     "sum_channel_applying_shifts",
+    "write_h5_output_run",
 ]

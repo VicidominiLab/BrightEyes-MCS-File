@@ -1,7 +1,11 @@
 """HDF5 calibration, output-building, and structure inspection helpers."""
 
+from __future__ import annotations
+
 from datetime import datetime, timezone
+import textwrap
 from html import escape
+from typing import Optional
 import json
 from pathlib import Path
 import shutil
@@ -14,6 +18,7 @@ from tqdm.auto import tqdm
 from .alignment import Alignment
 from . import mcs
 from .channel_skew_estimator import estimate_channel_skew
+from .h5_output_writers import ensure_output_group
 
 try:
     from importlib.metadata import PackageNotFoundError, version
@@ -1064,6 +1069,20 @@ class H5DataCalibrator:
             return "/raw/analog"
         return f"/raw/{str(product_name).strip('/')}"
 
+    @staticmethod
+    def _analog_adc_calibration_attrs(channel_count):
+        channel_count = max(0, int(channel_count))
+        channel_nan_values = [float("nan")] * channel_count
+        return {
+            "adc_calibration_formula": (
+                "voltage_v = adc_offset_v + adc_slope_v_per_adc_unit * adc_counts"
+            ),
+            "adc_offset_v": np.nan,
+            "adc_slope_v_per_adc_unit": np.nan,
+            "adc_channel_offset_v_json": json.dumps(channel_nan_values),
+            "adc_channel_slope_v_per_adc_unit_json": json.dumps(channel_nan_values),
+        }
+
     @classmethod
     def _copy_payload_dataset(
         cls,
@@ -1675,6 +1694,11 @@ class H5DataCalibrator:
             },
             required=False,
         )
+        if analog_dataset is not None:
+            self._set_group_attrs(
+                analog_dataset,
+                self._analog_adc_calibration_attrs(analog_dataset.shape[-1]),
+            )
         self._copy_payload_dataset(
             data_handle,
             output_handle,
@@ -2723,12 +2747,17 @@ class H5DataCalibrator:
 DEFAULT_OUTPUT_KEY = "output"
 DEFAULT_SUM_CHANNELS_RUN_ID = "sum_channels_without_corrections_001"
 DEFAULT_SUM_CHANNELS_WITH_SKEW_CORRECTION_RUN_ID = "sum_channels_001"
+SUM_IRF_TRACE_OUTPUT_KIND = "sum_irf_trace"
+SUM_REFERENCE_TRACE_OUTPUT_KIND = "sum_reference_trace"
+DEFAULT_SUM_IRF_TRACE_ID = "sum_irf_001"
+DEFAULT_SUM_REFERENCE_TRACE_ID = "sum_ref_001"
 SUM_CHANNELS_AGGREGATION = "sum_channels_without_corrections"
 SUM_CHANNELS_WITH_SKEW_CORRECTION_AGGREGATION = "sum_channels_with_skew_correction"
 SUM_CHANNELS_TOOL_NAME = "Sum channels"
 SUM_CHANNELS_WITH_SKEW_CORRECTION_TOOL_NAME = "Sum channels with skew correction"
 DEFAULT_SPAD_DATA_KEYS = ("raw/spad",)
 DEFAULT_AUX_DATA_KEYS = ("raw/aux",)
+DEFAULT_ANALOG_DATA_KEYS = ("raw/analog",)
 DEFAULT_PRIMARY_DATA_KEYS = DEFAULT_SPAD_DATA_KEYS
 DEFAULT_EXTRA_DATA_KEYS = DEFAULT_AUX_DATA_KEYS
 DEFAULT_MAX_BLOCK_BYTES = 128 * 1024 * 1024
@@ -2760,17 +2789,17 @@ class H5OutputBuilder:
 
     The builder creates two kinds of output:
 
-    - ``/output/virtual_channels``: HDF5 virtual datasets named
-      ``data_channel_<i>`` and ``data_aux_channel_<i>`` that point to a
+    - ``/output/virtual_channels/<kind>/channel_<i>``: HDF5 virtual datasets
+      grouped by ``spad``, ``aux``, and ``analog`` source kind that point to a
       single source channel without copying raw data.
-    - ``/output/<sum_run_id>/products/image``: the
+    - ``/output/<sum_channels_run_id>/products/spad``: the
       "sum_channels_without_corrections" output, computed by summing the SPAD
       data along the final channel axis. When auxiliary digital data are present
       and ``include_aux_sum=True``, the auxiliary channels are also summed into
-      ``products/image_aux``.
-    - ``/output/<sum_channels_with_skew_correction_run_id>/products/image``: the
+      ``products/aux``.
+    - ``/output/<sum_channels_with_skew_correction_run_id>/products/spad``: the
       "sum_channels_with_skew_correction" output, stored by default as
-      ``/output/sum_channels_001/products/image`` and computed with
+      ``/output/sum_channels_001/products/spad`` and computed with
       :meth:`Alignment.sum_channel_applying_shifts` and the stored calibration
       ``channel_skew`` vector.
 
@@ -2802,13 +2831,13 @@ class H5OutputBuilder:
         primary_data_key=None,
         extra_data_key=None,
         create_virtual_channels=True,
-        create_sum=True,
-        create_sum_channels=None,
+        create_sum_channels=True,
+        create_sum=None,
         create_sum_channels_with_skew_correction=True,
         create_sum_using_shift=None,
         create_sum_shifted=None,
-        sum_run_id=DEFAULT_SUM_CHANNELS_RUN_ID,
-        sum_channels_run_id=None,
+        sum_channels_run_id=DEFAULT_SUM_CHANNELS_RUN_ID,
+        sum_run_id=None,
         sum_channels_with_skew_correction_run_id=DEFAULT_SUM_CHANNELS_WITH_SKEW_CORRECTION_RUN_ID,
         sum_using_shift_run_id=None,
         channels=None,
@@ -2834,28 +2863,36 @@ class H5OutputBuilder:
         self.primary_data_key = self._override_if_not_none(primary_data_key, spad_data_key)
         self.extra_data_key = self._override_if_not_none(extra_data_key, aux_data_key)
         self.create_virtual_channels = bool(create_virtual_channels)
-        create_sum = self._override_if_not_none(create_sum, create_sum_channels)
-        self.create_sum = bool(create_sum)
-        create_sum_channels_with_skew_correction = self._override_if_not_none(
-            create_sum_channels_with_skew_correction,
-            create_sum_using_shift,
-            create_sum_shifted,
-        )
+        if create_sum is not None:
+            self._warn_deprecated_alias("create_sum", "create_sum_channels")
+            create_sum_channels = create_sum
+        self.create_sum_channels = bool(create_sum_channels)
+        for alias, value in (
+            ("create_sum_using_shift", create_sum_using_shift),
+            ("create_sum_shifted", create_sum_shifted),
+        ):
+            if value is not None:
+                self._warn_deprecated_alias(
+                    alias,
+                    "create_sum_channels_with_skew_correction",
+                )
+                create_sum_channels_with_skew_correction = value
         self.create_sum_channels_with_skew_correction = bool(
             create_sum_channels_with_skew_correction
         )
-        self.create_sum_using_shift = self.create_sum_channels_with_skew_correction
-        sum_run_id = self._override_if_not_none(sum_run_id, sum_channels_run_id)
-        sum_channels_with_skew_correction_run_id = self._override_if_not_none(
-            sum_channels_with_skew_correction_run_id,
-            sum_using_shift_run_id,
-        )
-        self.sum_run_id = str(sum_run_id)
-        self.sum_channels_run_id = self.sum_run_id
+        if sum_run_id is not None:
+            self._warn_deprecated_alias("sum_run_id", "sum_channels_run_id")
+            sum_channels_run_id = sum_run_id
+        if sum_using_shift_run_id is not None:
+            self._warn_deprecated_alias(
+                "sum_using_shift_run_id",
+                "sum_channels_with_skew_correction_run_id",
+            )
+            sum_channels_with_skew_correction_run_id = sum_using_shift_run_id
+        self.sum_channels_run_id = str(sum_channels_run_id)
         self.sum_channels_with_skew_correction_run_id = str(
             sum_channels_with_skew_correction_run_id
         )
-        self.sum_using_shift_run_id = self.sum_channels_with_skew_correction_run_id
         self.channels = channels
         self.extra_channels = self._override_if_not_none(extra_channels, aux_channels)
         include_extra_sum = self._override_if_not_none(include_extra_sum, include_aux_sum)
@@ -2884,6 +2921,85 @@ class H5OutputBuilder:
         return value
 
     @staticmethod
+    def _warn_deprecated_alias(alias, canonical):
+        warnings.warn(
+            (
+                f"H5OutputBuilder parameter '{alias}' is deprecated; "
+                f"use '{canonical}' instead."
+            ),
+            DeprecationWarning,
+            stacklevel=3,
+        )
+
+    @property
+    def create_sum(self):
+        self._warn_deprecated_alias("create_sum", "create_sum_channels")
+        return self.create_sum_channels
+
+    @create_sum.setter
+    def create_sum(self, value):
+        self._warn_deprecated_alias("create_sum", "create_sum_channels")
+        self.create_sum_channels = bool(value)
+
+    @property
+    def create_sum_using_shift(self):
+        self._warn_deprecated_alias(
+            "create_sum_using_shift",
+            "create_sum_channels_with_skew_correction",
+        )
+        return self.create_sum_channels_with_skew_correction
+
+    @create_sum_using_shift.setter
+    def create_sum_using_shift(self, value):
+        self._warn_deprecated_alias(
+            "create_sum_using_shift",
+            "create_sum_channels_with_skew_correction",
+        )
+        self.create_sum_channels_with_skew_correction = bool(value)
+
+    @property
+    def create_sum_shifted(self):
+        self._warn_deprecated_alias(
+            "create_sum_shifted",
+            "create_sum_channels_with_skew_correction",
+        )
+        return self.create_sum_channels_with_skew_correction
+
+    @create_sum_shifted.setter
+    def create_sum_shifted(self, value):
+        self._warn_deprecated_alias(
+            "create_sum_shifted",
+            "create_sum_channels_with_skew_correction",
+        )
+        self.create_sum_channels_with_skew_correction = bool(value)
+
+    @property
+    def sum_run_id(self):
+        self._warn_deprecated_alias("sum_run_id", "sum_channels_run_id")
+        return self.sum_channels_run_id
+
+    @sum_run_id.setter
+    def sum_run_id(self, value):
+        self._warn_deprecated_alias("sum_run_id", "sum_channels_run_id")
+        self.sum_channels_run_id = str(value)
+
+    @property
+    def sum_using_shift_run_id(self):
+        self._warn_deprecated_alias(
+            "sum_using_shift_run_id",
+            "sum_channels_with_skew_correction_run_id",
+        )
+        return self.sum_channels_with_skew_correction_run_id
+
+    @sum_using_shift_run_id.setter
+    def sum_using_shift_run_id(self, value):
+        self._warn_deprecated_alias(
+            "sum_using_shift_run_id",
+            "sum_channels_with_skew_correction_run_id",
+        )
+        self.sum_channels_with_skew_correction_run_id = str(value)
+
+    @staticmethod
     def _pixel_spacing_from_range(range_um, point_count):
         if not np.isfinite(range_um):
             return np.nan
@@ -2907,6 +3023,26 @@ class H5OutputBuilder:
 
     def _product_path(self, run_id, product_name):
         return self._run_path(run_id, "products", product_name)
+
+    @staticmethod
+    def _trace_collection_defaults():
+        return {
+            "default_irf_trace_id": "",
+            "default_ref_trace_id": "",
+        }
+
+    @staticmethod
+    def _register_trace_output(output_group, trace_kind, output_id, output_path):
+        default_attrs = {
+            SUM_IRF_TRACE_OUTPUT_KIND: "default_irf_trace_id",
+            SUM_REFERENCE_TRACE_OUTPUT_KIND: "default_ref_trace_id",
+        }
+        default_id_attr = default_attrs.get(trace_kind)
+        if default_id_attr is None:
+            return
+        default_id = str(output_group.attrs.get(default_id_attr, ""))
+        if not default_id or default_id == output_id:
+            output_group.attrs[default_id_attr] = output_id
 
     def _create_common_run_groups(self, run_group):
         run_group.create_group("intermediates")
@@ -3072,6 +3208,11 @@ class H5OutputBuilder:
     def _source_info(self, dataset, kind):
         self._validate_channel_last_dataset(dataset, kind)
         axis_info = AXIS_ORDERS[dataset.ndim]
+        channel_axis_paths = {
+            "spad": "/raw/axes/detector_channel_index",
+            "aux": "/raw/axes/aux_channel_index",
+            "analog": "/raw/axes/analog_channel_index",
+        }
         return {
             "dataset": dataset,
             "kind": kind,
@@ -3079,10 +3220,12 @@ class H5OutputBuilder:
             "shape": tuple(dataset.shape),
             "channel_count": int(dataset.shape[-1]),
             "time_bins": int(dataset.shape[-2]),
+            "channel_axis_path": channel_axis_paths.get(kind, ""),
             "source_axis_order": axis_info["source"],
             "output_axis_order": axis_info["virtual"],
             "data_layout": axis_info["layout"],
             "subpixel_scan_mode": axis_info["subpixel_scan_mode"],
+            "units": "adc_counts" if kind == "analog" else "counts",
         }
 
     @staticmethod
@@ -3175,13 +3318,64 @@ class H5OutputBuilder:
         )
         return selected_skew, channel_skew_path, ""
 
+    def _selected_aligned_trace(
+        self,
+        handle,
+        calibration_path,
+        trace_name,
+        selected_channels,
+    ):
+        trace_dataset, trace_path = self._find_child_dataset(
+            handle,
+            calibration_path,
+            (f"aligned/{trace_name}",),
+        )
+        if trace_dataset is None:
+            return None, "", "", f"no aligned/{trace_name} dataset found under {calibration_path}"
+
+        trace = np.asarray(trace_dataset[...], dtype=float)
+        if trace.ndim != 2:
+            return None, trace_path, "", (
+                f"aligned trace at {trace_path} must be 2D, got {trace.shape}"
+            )
+
+        channel_index_dataset, channel_index_path = self._find_child_dataset(
+            handle,
+            calibration_path,
+            ("channels/index",),
+        )
+        if channel_index_dataset is None:
+            return None, trace_path, "", f"no channels/index dataset found under {calibration_path}"
+
+        channel_index = np.asarray(channel_index_dataset[...], dtype=int)
+        if channel_index.ndim != 1 or channel_index.shape != (trace.shape[1],):
+            return None, trace_path, channel_index_path, (
+                "channels/index must be 1D with the same length as the "
+                f"aligned trace channel axis (got {channel_index.shape} and {trace.shape})"
+            )
+
+        position_by_channel = {
+            int(channel): position
+            for position, channel in enumerate(channel_index)
+        }
+        missing_channels = [
+            channel for channel in selected_channels if channel not in position_by_channel
+        ]
+        if missing_channels:
+            return None, trace_path, channel_index_path, (
+                f"aligned trace at {trace_path} is missing source channels {missing_channels}"
+            )
+
+        positions = [position_by_channel[int(channel)] for channel in selected_channels]
+        return trace[:, positions], trace_path, channel_index_path, ""
+
     def _resolve_source_infos(self, handle):
         primary_dataset = self._find_dataset(
             handle,
             self.primary_data_key,
             DEFAULT_SPAD_DATA_KEYS,
             "SPAD data",
-            required=self.create_sum or self.create_sum_channels_with_skew_correction,
+            required=self.create_sum_channels or self.create_sum_channels_with_skew_correction,
         )
         extra_dataset = self._find_dataset(
             handle,
@@ -3201,6 +3395,16 @@ class H5OutputBuilder:
                 )
         return primary_info, extra_info
 
+    def _resolve_analog_source_info(self, handle):
+        analog_dataset = self._find_dataset(
+            handle,
+            None,
+            DEFAULT_ANALOG_DATA_KEYS,
+            "analog data",
+            required=False,
+        )
+        return self._source_info(analog_dataset, "analog") if analog_dataset is not None else None
+
     def _timing_attr_source(self, handle, primary_info):
         for metadata_timing_path in (
             "/raw/metadata/acquisition/timing",
@@ -3218,6 +3422,8 @@ class H5OutputBuilder:
     def _build_metadata_attrs(self, handle, primary_info, channels, metadata, fallback_time_axis_run_id=None):
         source_shape = primary_info["shape"]
         nrep, nz, ny, nx = (int(source_shape[i]) for i in range(4))
+        circular_repetition_count = int(source_shape[4]) if len(source_shape) == 8 else 1
+        circular_point_count = int(source_shape[5]) if len(source_shape) == 8 else 1
         output_time_bins = int(source_shape[-2])
         source_metadata_path = self._get_existing_path(
             handle,
@@ -3325,10 +3531,14 @@ class H5OutputBuilder:
             "nz": nz,
             "ny": ny,
             "nx": nx,
+            "circular_repetition_count": circular_repetition_count,
+            "circular_point_count": circular_point_count,
             "output_nrep": nrep,
             "output_nz": nz,
             "output_ny": ny,
             "output_nx": nx,
+            "output_circular_repetition_count": circular_repetition_count,
+            "output_circular_point_count": circular_point_count,
             "range_x_um": range_x_um,
             "range_y_um": range_y_um,
             "range_z_um": range_z_um,
@@ -3392,6 +3602,10 @@ class H5OutputBuilder:
         nz = int(metadata_attrs["output_nz"])
         ny = int(metadata_attrs["output_ny"])
         nx = int(metadata_attrs["output_nx"])
+        circular_repetition_count = int(
+            metadata_attrs.get("output_circular_repetition_count", 1)
+        )
+        circular_point_count = int(metadata_attrs.get("output_circular_point_count", 1))
         output_time_bins = int(metadata_attrs["output_time_bins"])
 
         self._create_axis_dataset(
@@ -3431,12 +3645,31 @@ class H5OutputBuilder:
                 },
             )
 
+        if metadata_attrs.get("data_layout") == "circular_8d":
+            self._create_axis_dataset(
+                axes_group,
+                "circular_repetition_index",
+                np.arange(circular_repetition_count, dtype=np.float64),
+                "index",
+                "circular repetition index",
+                "circular_repetition",
+            )
+            self._create_axis_dataset(
+                axes_group,
+                "circular_point_index",
+                np.arange(circular_point_count, dtype=np.float64),
+                "index",
+                "circular point index",
+                "circular_point",
+            )
+
         time_values, time_units = self._time_axis(output_time_bins, metadata_attrs["time_bin_ns"])
         self._create_axis_dataset(axes_group, "time_ns", time_values, time_units, "time", "time_bin")
         return axes_group
 
-    def _create_virtual_channel_dataset(self, group, source_info, channel_index, name, channel_type):
+    def _create_virtual_channel_dataset(self, group, source_info, channel_index):
         source_dataset = source_info["dataset"]
+        name = f"channel_{int(channel_index)}"
         layout = h5py.VirtualLayout(shape=source_dataset.shape[:-1], dtype=source_dataset.dtype)
         source = h5py.VirtualSource(
             ".",
@@ -3451,55 +3684,71 @@ class H5OutputBuilder:
             dataset,
             {
                 "virtual_channel_name": name,
-                "virtual_channel_type": channel_type,
+                "virtual_channel_type": source_info["kind"],
                 "virtual_source_file": ".",
                 "source_data_path": source_info["path"],
                 "source_channel_index": int(channel_index),
                 "source_channel_axis": -1,
+                "source_channel_axis_path": source_info["channel_axis_path"],
                 "source_selection": self._source_selection_string(source_dataset.ndim, channel_index),
                 "axis_order": source_info["output_axis_order"],
-                "units": "counts",
+                "units": source_info["units"],
                 "is_virtual_dataset": True,
             },
         )
 
-    def _create_virtual_channels(self, output_group, primary_info, extra_info):
-        group = output_group.create_group("virtual_channels")
-        axis_source_info = primary_info if primary_info is not None else extra_info
+    def _create_virtual_channel_group(self, parent_group, source_info):
+        group = parent_group.create_group(source_info["kind"])
         self._set_attrs(
             group,
             {
-                "description": "Named virtual datasets mapping individual source channels.",
-                "spad_source_data_path": primary_info["path"] if primary_info is not None else "",
-                "aux_source_data_path": extra_info["path"] if extra_info is not None else "",
-                "spad_channel_count": primary_info["channel_count"] if primary_info is not None else 0,
-                "aux_channel_count": extra_info["channel_count"] if extra_info is not None else 0,
-                "source_axis_order": axis_source_info["source_axis_order"] if axis_source_info is not None else "",
-                "virtual_axis_order": axis_source_info["output_axis_order"] if axis_source_info is not None else "",
-                "naming_rule_spad": "data_channel_<channel_index>",
-                "naming_rule_aux": "data_aux_channel_<aux_channel_index>",
+                "description": (
+                    f"Virtual datasets mapping individual {source_info['kind']} "
+                    "source channels."
+                ),
+                "virtual_channel_type": source_info["kind"],
+                "source_data_path": source_info["path"],
+                "source_channel_axis": -1,
+                "source_channel_axis_path": source_info["channel_axis_path"],
+                "channel_count": source_info["channel_count"],
+                "source_axis_order": source_info["source_axis_order"],
+                "virtual_axis_order": source_info["output_axis_order"],
+                "data_layout": source_info["data_layout"],
+                "units": source_info["units"],
+                "naming_rule": "channel_<channel_index>",
             },
         )
+        for channel_index in range(source_info["channel_count"]):
+            self._create_virtual_channel_dataset(group, source_info, channel_index)
 
-        if primary_info is not None:
-            for channel_index in range(primary_info["channel_count"]):
-                self._create_virtual_channel_dataset(
-                    group,
-                    primary_info,
-                    channel_index,
-                    f"data_channel_{channel_index}",
-                    "spad",
-                )
-
-        if extra_info is not None:
-            for channel_index in range(extra_info["channel_count"]):
-                self._create_virtual_channel_dataset(
-                    group,
-                    extra_info,
-                    channel_index,
-                    f"data_aux_channel_{channel_index}",
-                    "aux",
-                )
+    def _create_virtual_channels(self, output_group, primary_info, extra_info, analog_info=None):
+        group = output_group.create_group("virtual_channels")
+        source_infos = [
+            source_info
+            for source_info in (primary_info, extra_info, analog_info)
+            if source_info is not None
+        ]
+        axis_source_info = source_infos[0] if source_infos else None
+        self._set_attrs(
+            group,
+            {
+                "description": (
+                    "Typed virtual datasets mapping individual source channels."
+                ),
+                "spad_source_data_path": primary_info["path"] if primary_info is not None else "",
+                "aux_source_data_path": extra_info["path"] if extra_info is not None else "",
+                "analog_source_data_path": analog_info["path"] if analog_info is not None else "",
+                "spad_channel_count": primary_info["channel_count"] if primary_info is not None else 0,
+                "aux_channel_count": extra_info["channel_count"] if extra_info is not None else 0,
+                "analog_channel_count": analog_info["channel_count"] if analog_info is not None else 0,
+                "source_axis_order": axis_source_info["source_axis_order"] if axis_source_info is not None else "",
+                "virtual_axis_order": axis_source_info["output_axis_order"] if axis_source_info is not None else "",
+                "naming_rule": "<kind>/channel_<channel_index>",
+                "kind_groups_json": json.dumps([source_info["kind"] for source_info in source_infos]),
+            },
+        )
+        for source_info in source_infos:
+            self._create_virtual_channel_group(group, source_info)
 
     def _sum_channels_to_dataset(self, source_dataset, target_dataset, channels):
         channel_count = int(source_dataset.shape[-1])
@@ -3593,7 +3842,7 @@ class H5OutputBuilder:
                     shifted_sum = np.reshape(shifted_sum, expected_shape[2:])
                 target_dataset[target_selection] = shifted_sum
 
-    def _create_sum_product(
+    def _create_sum_channels_product(
         self,
         products_group,
         name,
@@ -3690,7 +3939,166 @@ class H5OutputBuilder:
         self._sum_channels_with_shifts_to_dataset(source_dataset, dataset, channels, shifts)
         return dataset
 
-    def _create_sum_run(self, handle, output_group, primary_info, extra_info):
+    def _create_common_shifted_calibration_trace(
+        self,
+        output_group,
+        handle,
+        output_id,
+        trace_kind,
+        calibration_path,
+        trace_name,
+        channels,
+        shifts,
+        channel_skew_path,
+        metadata_attrs,
+        long_name,
+        description,
+    ):
+        trace, trace_path, channel_index_path, error = self._selected_aligned_trace(
+            handle,
+            calibration_path,
+            trace_name,
+            channels,
+        )
+        if error:
+            output_group.attrs[f"{output_id}_skipped"] = True
+            output_group.attrs[f"{output_id}_skip_reason"] = error
+            return None
+
+        shifted_sum = Alignment.sum_channel_applying_shifts(
+            trace,
+            shifts,
+            axis=(),
+            reverse_shifts=self.shifted_sum_reverse_shifts,
+            backend=self.shifted_sum_backend,
+            chunk_size=self.shifted_sum_chunk_size,
+            show_progress=self.shifted_sum_show_progress,
+        )
+        if output_id in output_group:
+            del output_group[output_id]
+        run_group = output_group.create_group(output_id)
+        trace_product_path = self._product_path(output_id, "trace")
+        trace_metadata_path = self._metadata_path(output_id)
+        trace_time_axis_path = self._time_axis_path(output_id)
+        self._set_attrs(
+            run_group,
+            {
+                "output_id": output_id,
+                "output_type": "trace_tool",
+                "trace_kind": trace_kind,
+                "tool_name": long_name,
+                "created_utc": self._utc_now(),
+                "software_name": "brighteyes_mcs_file",
+                "software_version": self._package_version(),
+                "algorithm_name": "sum_channel_applying_shifts",
+                "algorithm_version": "0.1.0",
+                "source_output_run_id": self.sum_channels_with_skew_correction_run_id,
+                "source_output_run_path": self._run_path(
+                    self.sum_channels_with_skew_correction_run_id
+                ),
+                "source_trace_path": trace_path,
+                "source_calibration_path": calibration_path,
+                "source_channel_index_path": channel_index_path,
+                "source_metadata_path": metadata_attrs["source_metadata_path"],
+                "source_time_axis_path": metadata_attrs["source_time_axis_path"],
+                "output_data_path": trace_product_path,
+                "metadata_path": trace_metadata_path,
+                "time_axis_path": trace_time_axis_path,
+                "channel_skew_path": channel_skew_path,
+                "parameter_encoding": "attrs_and_json",
+            },
+        )
+
+        inputs_group = run_group.create_group("inputs")
+        self._set_attrs(
+            inputs_group,
+            {
+                "source_trace_path": trace_path,
+                "source_calibration_path": calibration_path,
+                "source_channel_index_path": channel_index_path,
+                "source_output_run_path": self._run_path(
+                    self.sum_channels_with_skew_correction_run_id
+                ),
+                "selected_channels_json": json.dumps(channels),
+                "channel_skew_path": channel_skew_path,
+                "channel_skew_json": json.dumps(np.asarray(shifts, dtype=float).tolist()),
+            },
+        )
+
+        metadata_group = run_group.create_group("metadata")
+        self._set_attrs(metadata_group, metadata_attrs)
+
+        parameters_group = run_group.create_group("parameters")
+        self._set_attrs(
+            parameters_group,
+            {
+                "parameters_json": json.dumps(
+                    {
+                        "channels": channels,
+                        "reverse_shifts": self.shifted_sum_reverse_shifts,
+                        "backend": self.shifted_sum_backend,
+                        "chunk_size": self.shifted_sum_chunk_size,
+                    }
+                ),
+                "tool_name": long_name,
+                "tool_mode": trace_kind,
+                "channel_selection_json": json.dumps(channels),
+                "time_bin_selection_json": metadata_attrs["selected_time_bins_json"],
+                "normalize_output": False,
+                "use_calibration": True,
+                "channel_skew_path": channel_skew_path,
+                "reverse_shifts": self.shifted_sum_reverse_shifts,
+                "backend": self.shifted_sum_backend,
+            },
+        )
+
+        self._create_axes(run_group, metadata_attrs)
+        products_group = run_group.create_group("products")
+        dataset = products_group.create_dataset(
+            "trace",
+            data=np.asarray(shifted_sum, dtype=np.float64),
+        )
+        self._set_attrs(
+            dataset,
+            {
+                "output_id": output_id,
+                "output_run_path": run_group.name,
+                "output_type": "trace",
+                "trace_kind": trace_kind,
+                "units": "normalized_counts",
+                "long_name": long_name,
+                "axis_order": "time_bin",
+                "source_output_run_id": self.sum_channels_with_skew_correction_run_id,
+                "source_output_run_path": self._run_path(
+                    self.sum_channels_with_skew_correction_run_id
+                ),
+                "source_trace_path": trace_path,
+                "source_calibration_path": calibration_path,
+                "source_channel_index_path": channel_index_path,
+                "source_metadata_path": metadata_attrs["source_metadata_path"],
+                "metadata_path": trace_metadata_path,
+                "source_time_axis_path": metadata_attrs["source_time_axis_path"],
+                "time_axis_path": trace_time_axis_path,
+                "time_bin_ns": metadata_attrs["time_bin_ns"],
+                "laser_frequency_mhz": metadata_attrs["laser_frequency_mhz"],
+                "laser_period_ns": metadata_attrs["laser_period_ns"],
+                "source_channel_axis": -1,
+                "selected_channels_json": json.dumps(channels),
+                "channel_aggregation": SUM_CHANNELS_WITH_SKEW_CORRECTION_AGGREGATION,
+                "channel_skew_path": channel_skew_path,
+                "channel_skew_json": json.dumps(np.asarray(shifts, dtype=float).tolist()),
+                "algorithm_name": "sum_channel_applying_shifts",
+                "algorithm_version": "0.1.0",
+                "reverse_shifts": self.shifted_sum_reverse_shifts,
+                "shift_backend": self.shifted_sum_backend,
+                "description": description,
+            },
+        )
+        self._create_common_run_groups(run_group)
+        self._register_trace_output(output_group, trace_kind, output_id, dataset.name)
+        return dataset
+
+    def _create_sum_channels_run(self, handle, output_group, primary_info, extra_info):
         metadata = self._read_mcs_metadata(self.data_path)
         channels = self._resolve_channels(self.channels, primary_info["channel_count"], "channels")
         metadata_attrs = self._build_metadata_attrs(
@@ -3732,7 +4140,7 @@ class H5OutputBuilder:
                 "source_axes_path": metadata_attrs["source_axes_path"],
                 "input_axis_order": primary_info["source_axis_order"],
                 "output_axis_order": primary_info["output_axis_order"],
-                "output_data_path": self._product_path(self.sum_channels_run_id, "image"),
+                "output_data_path": self._product_path(self.sum_channels_run_id, "spad"),
                 "time_axis_source": metadata_attrs["source_time_axis_path"],
                 "time_axis_path": self._time_axis_path(self.sum_channels_run_id),
                 "channel_axis_source": f"{primary_info['path']} final axis",
@@ -3785,9 +4193,9 @@ class H5OutputBuilder:
 
         self._create_axes(run_group, metadata_attrs)
         products_group = run_group.create_group("products")
-        self._create_sum_product(
+        self._create_sum_channels_product(
             products_group,
-            "image",
+            "spad",
             primary_info,
             channels,
             metadata_attrs,
@@ -3800,9 +4208,9 @@ class H5OutputBuilder:
         )
 
         if self.include_extra_sum and extra_info is not None:
-            self._create_sum_product(
+            self._create_sum_channels_product(
                 products_group,
-                "image_aux",
+                "aux",
                 extra_info,
                 extra_channels,
                 metadata_attrs,
@@ -3893,7 +4301,7 @@ class H5OutputBuilder:
                 "output_axis_order": primary_info["output_axis_order"],
                 "output_data_path": self._product_path(
                     self.sum_channels_with_skew_correction_run_id,
-                    "image",
+                    "spad",
                 ),
                 "time_axis_source": metadata_attrs["source_time_axis_path"],
                 "time_axis_path": self._time_axis_path(
@@ -3960,7 +4368,7 @@ class H5OutputBuilder:
         products_group = run_group.create_group("products")
         self._create_sum_channels_with_skew_correction_product(
             products_group,
-            "image",
+            "spad",
             primary_info,
             channels,
             primary_shifts,
@@ -3973,12 +4381,46 @@ class H5OutputBuilder:
                 "Alignment.sum_channel_applying_shifts(data, channel_skew)."
             ),
         )
+        self._create_common_shifted_calibration_trace(
+            output_group,
+            handle,
+            DEFAULT_SUM_IRF_TRACE_ID,
+            SUM_IRF_TRACE_OUTPUT_KIND,
+            primary_calibration_path,
+            "irf_trace",
+            channels,
+            primary_shifts,
+            primary_skew_path,
+            metadata_attrs,
+            "channel-skew-corrected summed IRF trace",
+            (
+                "Common IRF trace produced from aligned/irf_trace using "
+                "Alignment.sum_channel_applying_shifts(trace, channel_skew)."
+            ),
+        )
+        self._create_common_shifted_calibration_trace(
+            output_group,
+            handle,
+            DEFAULT_SUM_REFERENCE_TRACE_ID,
+            SUM_REFERENCE_TRACE_OUTPUT_KIND,
+            primary_calibration_path,
+            "reference_trace",
+            channels,
+            primary_shifts,
+            primary_skew_path,
+            metadata_attrs,
+            "channel-skew-corrected summed reference trace",
+            (
+                "Common reference trace produced from aligned/reference_trace "
+                "using Alignment.sum_channel_applying_shifts(trace, channel_skew)."
+            ),
+        )
 
         if self.include_extra_shifted_sum and extra_info is not None:
             if extra_shifts is not None:
                 self._create_sum_channels_with_skew_correction_product(
                     products_group,
-                    "image_aux",
+                    "aux",
                     extra_info,
                     extra_channels,
                     extra_shifts,
@@ -4029,53 +4471,15 @@ class H5OutputBuilder:
                 if not self.overwrite:
                     raise FileExistsError(f"/{self.output_key} already exists in {output_path}")
                 del handle[self.output_key]
-            output_group = handle.create_group(self.output_key)
-            self._set_attrs(
-                output_group,
-                {
-                    "default": "",
-                    "run_count": 0,
-                    "description": "Derived analysis outputs. Measured payload is stored under /raw.",
-                    "source_data_path": primary_info["path"] if primary_info is not None else "",
-                    "source_aux_data_path": extra_info["path"] if extra_info is not None else "",
-                    "metadata_path": f"/{self.output_key}/metadata",
-                    "source_metadata_path": BRIGHTEYES_H5_METADATA_PATH
-                    if BRIGHTEYES_H5_METADATA_PATH.strip("/") in handle
-                    else "",
-                    "source_axes_path": BRIGHTEYES_H5_AXES_PATH
-                    if BRIGHTEYES_H5_AXES_PATH.strip("/") in handle
-                    else "",
-                    "default_axes_path": "",
-                    "default_metadata_path": "",
-                    "legacy_path": BRIGHTEYES_H5_LEGACY_PATH
-                    if BRIGHTEYES_H5_LEGACY_PATH.strip("/") in handle
-                    else "",
-                },
-            )
-            output_metadata_group = output_group.create_group("metadata")
-            self._set_attrs(
-                output_metadata_group,
-                {
-                    "description": "Normalized metadata for the output collection.",
-                    "source_data_path": primary_info["path"] if primary_info is not None else "",
-                    "source_aux_data_path": extra_info["path"] if extra_info is not None else "",
-                    "source_metadata_path": output_group.attrs["source_metadata_path"],
-                    "source_axes_path": output_group.attrs["source_axes_path"],
-                    "default_run_id": "",
-                    "default_run_metadata_path": "",
-                    "default_run_axes_path": "",
-                    "run_count": 0,
-                },
-            )
+            output_group = ensure_output_group(handle, self.output_key)
 
             if self.create_virtual_channels:
-                self._create_virtual_channels(output_group, primary_info, extra_info)
+                analog_info = self._resolve_analog_source_info(handle)
+                self._create_virtual_channels(output_group, primary_info, extra_info, analog_info)
             default_run = ""
-            run_count = 0
-            if self.create_sum:
-                self._create_sum_run(handle, output_group, primary_info, extra_info)
+            if self.create_sum_channels:
+                self._create_sum_channels_run(handle, output_group, primary_info, extra_info)
                 default_run = self.sum_channels_run_id
-                run_count += 1
             if self.create_sum_channels_with_skew_correction:
                 shifted_created = self._create_sum_channels_with_skew_correction_run(
                     handle,
@@ -4084,26 +4488,9 @@ class H5OutputBuilder:
                     extra_info,
                 )
                 if shifted_created:
-                    if not default_run:
-                        default_run = self.sum_channels_with_skew_correction_run_id
-                    run_count += 1
+                    default_run = self.sum_channels_with_skew_correction_run_id
 
             output_group.attrs["default"] = default_run
-            output_group.attrs["run_count"] = run_count
-            output_group.attrs["default_metadata_path"] = (
-                self._metadata_path(default_run) if default_run else ""
-            )
-            output_group.attrs["default_axes_path"] = (
-                self._run_path(default_run, "axes") if default_run else ""
-            )
-            output_metadata_group.attrs["default_run_id"] = default_run
-            output_metadata_group.attrs["default_run_metadata_path"] = output_group.attrs[
-                "default_metadata_path"
-            ]
-            output_metadata_group.attrs["default_run_axes_path"] = output_group.attrs[
-                "default_axes_path"
-            ]
-            output_metadata_group.attrs["run_count"] = run_count
 
         return str(output_path)
 
@@ -4346,223 +4733,431 @@ def show_h5_structure(file_path, include_attrs=True, attrs_inline=False):
     return structure
 
 
-def show_h5_structure_html(file_path, include_attrs=True, attrs_inline=True, display_output=True):
+def show_h5_structure(
+    file_path,
+    *,
+    include_attrs: bool = True,
+    attrs_inline: bool = False,
+    tree_chars: bool = True,
+    max_depth: Optional[int] = None,
+    max_attr_len: int = 120,
+) -> str:
     """
-    Return an HTML tree view of an HDF5 file structure.
+    Return and print a readable tree view of an HDF5 file structure.
 
     Parameters
     ----------
     file_path : str or path-like
         HDF5 file to inspect.
     include_attrs : bool, default True
-        If ``True``, include group and dataset attributes in the output.
-    attrs_inline : bool, default True
-        If ``True``, render all attributes for a node on one line.
-    display_output : bool, default True
-        If ``True`` and IPython is available, display the HTML immediately.
+        Include group and dataset attributes in the output.
+    attrs_inline : bool, default False
+        Print attributes on one line below each node (``node.attrs: k=v, …``).
+        When *False*, each attribute is printed on its own line as ``@key = value``.
+    tree_chars : bool, default True
+        Use ``├──`` / ``└──`` connectors for a classic tree look.
+        When *False*, use plain indentation (easier to copy-paste).
+    max_depth : int or None, default None
+        Maximum nesting depth to visit (root = 0).  ``None`` means unlimited.
+    max_attr_len : int, default 120
+        Truncate attribute value reprs that exceed this many characters.
     """
+    lines: list[str] = []
 
-    def format_value(value):
-        value_repr = escape(repr(value))
+    def _truncate(value) -> str:
+        r = repr(value)
+        if len(r) > max_attr_len:
+            r = r[: max_attr_len - 3] + "..."
+        return r
+
+    def _append_attrs(node, indent: str, node_name: str = "") -> None:
+        if not include_attrs:
+            return
+        items = list(node.attrs.items())
+        if not items:
+            return
+        if attrs_inline:
+            prefix = f"{node_name}.attrs" if node_name else ".attrs"
+            joined = ", ".join(f"{k}={_truncate(v)}" for k, v in items)
+            lines.append(f"{indent}{prefix}: {joined}")
+        else:
+            for k, v in items:
+                lines.append(f"{indent}@{k} = {_truncate(v)}")
+
+    def _visit(name: str, obj, siblings_remaining: bool = False) -> None:
+        depth = name.count("/") if name else 0
+        if max_depth is not None and depth > max_depth:
+            return
+
+        if name == "":
+            lines.append("/")
+            _append_attrs(obj, "  ")
+            return
+
+        node_name = name.split("/")[-1]
+        base_indent = "  " * depth
+
+        if tree_chars:
+            connector = "├── " if siblings_remaining else "└── "
+            label_indent = base_indent + connector
+            child_indent = base_indent + ("│   " if siblings_remaining else "    ")
+        else:
+            label_indent = base_indent
+            child_indent = base_indent + "  "
+
+        if isinstance(obj, h5py.Dataset):
+            lines.append(
+                f"{label_indent}{node_name}  "
+                f"shape={obj.shape}  dtype={obj.dtype}"
+            )
+            _append_attrs(obj, child_indent, node_name=node_name)
+
+        elif isinstance(obj, h5py.Group):
+            lines.append(f"{label_indent}{node_name}/")
+            _append_attrs(obj, child_indent, node_name=node_name)
+            # recurse into children
+            if max_depth is None or depth < max_depth:
+                keys = list(obj.keys())
+                for i, child_key in enumerate(keys):
+                    _visit(
+                        f"{name}/{child_key}" if name else child_key,
+                        obj[child_key],
+                        siblings_remaining=(i < len(keys) - 1),
+                    )
+
+    with h5py.File(file_path, "r") as fh:
+        _visit("", fh)
+        # top-level children
+        keys = list(fh.keys())
+        for i, key in enumerate(keys):
+            _visit(key, fh[key], siblings_remaining=(i < len(keys) - 1))
+
+    structure = "\n".join(lines)
+    print(structure)
+    return structure
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# HTML viewer (Jupyter / JupyterLab)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# A unique prefix keeps multiple widgets on the same notebook page independent.
+_WIDGET_COUNTER = 0
+
+
+def show_h5_structure_html(
+    file_path,
+    *,
+    include_attrs: bool = True,
+    attrs_inline: bool = True,
+    max_attr_len: int = 200,
+    display_output: bool = True,
+) -> str:
+    """
+    Return an interactive HTML tree view of an HDF5 file structure.
+
+    All groups are **collapsed by default**; click a group label to expand it.
+    Level-buttons on each group let you open/close *all siblings at the same
+    depth* in one click.  Global **Expand all** / **Collapse all** buttons sit
+    at the top of the widget.
+
+    Parameters
+    ----------
+    file_path : str or path-like
+        HDF5 file to inspect.
+    include_attrs : bool, default True
+        Include group and dataset attributes.
+    attrs_inline : bool, default True
+        Render all attributes for a node on one line.
+    max_attr_len : int, default 200
+        Truncate attribute value reprs longer than this.
+    display_output : bool, default True
+        If *True* and IPython is available, display the HTML immediately.
+    """
+    global _WIDGET_COUNTER
+    _WIDGET_COUNTER += 1
+    uid = f"h5tree_{_WIDGET_COUNTER}"
+
+    # ── helpers ────────────────────────────────────────────────────────────────
+
+    def _fmt_value(value) -> str:
+        r = repr(value)
+        if len(r) > max_attr_len:
+            r = r[: max_attr_len - 3] + "..."
+        r_esc = escape(r)
         if isinstance(value, np.ndarray):
             return (
-                f"{value_repr} "
+                f"{r_esc} "
                 f"<span class='h5-array-shape'>shape={escape(str(value.shape))}</span>"
             )
-        return value_repr
+        return r_esc
 
-    def render_attrs(node, node_name):
+    def _render_attrs(node, node_name: str) -> str:
         if not include_attrs or len(node.attrs) == 0:
             return ""
-
         items = list(node.attrs.items())
         if attrs_inline:
-            joined = ", ".join(
-                f"<span class='h5-attr-key'>{escape(str(key))}</span>="
-                f"<span class='h5-attr-value'>{format_value(value)}</span>"
-                for key, value in items
+            pairs = ", ".join(
+                f"<span class='h5-attr-key'>{escape(str(k))}</span>"
+                f"=<span class='h5-attr-value'>{_fmt_value(v)}</span>"
+                for k, v in items
             )
             return (
                 f"<div class='h5-attrs-inline'>"
                 f"<span class='h5-attrs-prefix'>"
-                f"<span class='h5-node-ref'>{escape(node_name)}.attrs</span>:"
+                f"<span class='h5-node-ref'>{escape(node_name)}.attrs</span>: "
                 f"</span>"
-                f"<span class='h5-attrs-content'>{joined}</span>"
+                f"<span class='h5-attrs-content'>{pairs}</span>"
                 f"</div>"
             )
+        rows = "".join(
+            f"<li>"
+            f"<span class='h5-node-ref'>{escape(node_name)}.attrs.</span>"
+            f"<span class='h5-attr-key'>{escape(str(k))}</span>"
+            f" = <span class='h5-attr-value'>{_fmt_value(v)}</span>"
+            f"</li>"
+            for k, v in items
+        )
+        return f"<ul class='h5-attrs-list'>{rows}</ul>"
 
-        parts = ["<ul class='h5-attrs-list'>"]
-        for key, value in items:
-            parts.append(
-                "<li>"
-                f"<span class='h5-node-ref'>{escape(node_name)}.attrs.</span>"
-                f"<span class='h5-attr-key'>{escape(str(key))}</span>"
-                f" = <span class='h5-attr-value'>{format_value(value)}</span>"
-                "</li>"
-            )
-        parts.append("</ul>")
-        return "".join(parts)
-
-    def render_node(name, obj):
+    def _render_node(name: str, obj, depth: int) -> str:
         node_name = name.split("/")[-1] if name else "/"
+
         if isinstance(obj, h5py.Dataset):
-            label = (
+            attrs_html = _render_attrs(obj, node_name)
+            return (
+                f"<li data-depth='{depth}' class='h5-li-dataset'>"
                 f"<span class='h5-dataset'>{escape(node_name)}</span> "
                 f"<span class='h5-meta'>shape={escape(str(obj.shape))} "
                 f"dtype={escape(str(obj.dtype))}</span>"
+                f"{attrs_html}"
+                f"</li>"
             )
-            attrs_html = render_attrs(obj, node_name)
-            return f"<li>{label}{attrs_html}</li>"
 
-        label = f"<span class='h5-group'>{escape(node_name)}</span>/"
-        attrs_html = render_attrs(obj, node_name)
-        children = []
-        for child_name in obj.keys():
-            children.append(render_node(child_name, obj[child_name]))
-        children_html = ""
-        if children:
-            children_html = f"<ul>{''.join(children)}</ul>"
-        return (
-            "<li>"
-            "<details class='h5-branch' open>"
-            f"<summary>{label}</summary>"
-            f"{attrs_html}"
-            f"{children_html}"
-            "</details>"
-            "</li>"
+        # Group
+        attrs_html = _render_attrs(obj, node_name)
+        children_html = "".join(
+            _render_node(child_key, obj[child_key], depth + 1)
+            for child_key in obj.keys()
+        )
+        children_block = f"<ul data-depth='{depth + 1}'>{children_html}</ul>" if children_html else ""
+
+        # Level-control buttons (expand / collapse siblings at same depth)
+        level_btns = (
+            f"<span class='h5-level-btns' data-depth='{depth}' data-widget='{uid}'>"
+            f"<button class='h5-lvl-btn' "
+            f"onclick=\"h5LevelToggle('{uid}', {depth}, true, this)\""
+            f" title='Espandi tutti i gruppi di questo livello'>▸ lvl</button>"
+            f"<button class='h5-lvl-btn' "
+            f"onclick=\"h5LevelToggle('{uid}', {depth}, false, this)\""
+            f" title='Comprimi tutti i gruppi di questo livello'>▾ lvl</button>"
+            f"</span>"
         )
 
-    with h5py.File(file_path, "r") as handle:
-        children = [render_node(name, handle[name]) for name in handle.keys()]
-        root_attrs_html = render_attrs(handle, "/")
+        return (
+            f"<li data-depth='{depth}' class='h5-li-group'>"
+            f"<details class='h5-branch'>"  # NOT open → collapsed by default
+            f"<summary>"
+            f"<span class='h5-group'>{escape(node_name)}</span>/"
+            f"{level_btns}"
+            f"</summary>"
+            f"{attrs_html}"
+            f"{children_block}"
+            f"</details>"
+            f"</li>"
+        )
 
-    html_output = f"""
-<div class="h5-tree">
-  <style>
-    .h5-tree {{
+    # ── build tree ─────────────────────────────────────────────────────────────
+    with h5py.File(file_path, "r") as fh:
+        root_attrs_html = _render_attrs(fh, "/")
+        children_html = "".join(
+            _render_node(key, fh[key], depth=1) for key in fh.keys()
+        )
+
+    js = textwrap.dedent(f"""
+    <script>
+    (function () {{
+      // Expand / collapse ALL groups in the widget
+      function h5All(widgetId, open) {{
+        var root = document.getElementById(widgetId);
+        if (!root) return;
+        root.querySelectorAll('details.h5-branch').forEach(function(d) {{
+          d.open = open;
+        }});
+      }}
+
+      // Expand / collapse all groups at a specific depth inside a widget
+      function h5LevelToggle(widgetId, depth, open, btn) {{
+        // Stop the click from toggling the parent <details>
+        if (btn) {{ btn.closest('details') && (event || window.event) && (event || window.event).stopPropagation(); }}
+        var root = document.getElementById(widgetId);
+        if (!root) return;
+        root.querySelectorAll('li.h5-li-group[data-depth="' + depth + '"]').forEach(function(li) {{
+          var det = li.querySelector(':scope > details.h5-branch');
+          if (det) det.open = open;
+        }});
+      }}
+
+      // Expose globally so onclick= attributes work
+      window.h5All = h5All;
+      window.h5LevelToggle = h5LevelToggle;
+    }})();
+    </script>
+    """).strip()
+
+    css = textwrap.dedent("""
+    <style>
+    .h5-tree {
       color-scheme: light dark;
       font-family: "Menlo", "Consolas", "DejaVu Sans Mono", monospace;
       font-size: 13px;
-      line-height: 1.5;
-      color: var(--h5-fg);
-      --h5-fg: #1f2937;
-      --h5-muted: #6b7280;
-      --h5-border: #d1d5db;
-      --h5-group: #0f766e;
-      --h5-dataset: #1d4ed8;
-      --h5-attrs: #7c2d12;
-      --h5-node-ref: #7c3aed;
-      --h5-attr-key: #b45309;
+      line-height: 1.6;
+      --h5-fg:         #1f2937;
+      --h5-muted:      #6b7280;
+      --h5-border:     #d1d5db;
+      --h5-group:      #0f766e;
+      --h5-dataset:    #1d4ed8;
+      --h5-attrs:      #7c2d12;
+      --h5-node-ref:   #7c3aed;
+      --h5-attr-key:   #b45309;
       --h5-attr-value: #374151;
-      --h5-root: #111827;
-    }}
-    @media (prefers-color-scheme: dark) {{
-      .h5-tree {{
-        --h5-fg: #e5e7eb;
-        --h5-muted: #9ca3af;
-        --h5-border: #4b5563;
-        --h5-group: #5eead4;
-        --h5-dataset: #93c5fd;
-        --h5-attrs: #fdba74;
-        --h5-node-ref: #c4b5fd;
-        --h5-attr-key: #fbbf24;
+      --h5-root:       #111827;
+      --h5-btn-bg:     #f3f4f6;
+      --h5-btn-border: #d1d5db;
+      --h5-btn-fg:     #374151;
+    }
+    @media (prefers-color-scheme: dark) {
+      .h5-tree {
+        --h5-fg:         #e5e7eb;
+        --h5-muted:      #9ca3af;
+        --h5-border:     #4b5563;
+        --h5-group:      #5eead4;
+        --h5-dataset:    #93c5fd;
+        --h5-attrs:      #fdba74;
+        --h5-node-ref:   #c4b5fd;
+        --h5-attr-key:   #fbbf24;
         --h5-attr-value: #f3f4f6;
-        --h5-root: #f9fafb;
-      }}
-    }}
-    .h5-tree ul {{
+        --h5-root:       #f9fafb;
+        --h5-btn-bg:     #374151;
+        --h5-btn-border: #6b7280;
+        --h5-btn-fg:     #e5e7eb;
+      }
+    }
+    .h5-tree { color: var(--h5-fg); }
+    .h5-tree ul {
       list-style: none;
-            margin: 0.2rem 0 0.2rem 1.1rem;
-            padding-left: 1rem;
-            border-left: 1px solid var(--h5-border);
-    }}
-        /* Top-level children should have the same visual indent as inline attrs */
-        .h5-tree > ul {{
-            margin: 0.2rem 0 0.2rem 0;
-            padding-left: 1rem;
-            border-left: none;
-        }}
-    .h5-tree li {{
-      margin: 0.2rem 0;
-    }}
-    .h5-tree summary {{
+      margin: 0.15rem 0 0.15rem 1rem;
+      padding-left: 1rem;
+      border-left: 1px solid var(--h5-border);
+    }
+    /* root-level list: no left border */
+    .h5-tree > ul {
+      margin-left: 0;
+      border-left: none;
+    }
+    .h5-tree li { margin: 0.2rem 0; }
+
+    /* summary: flex so label + buttons sit on one row */
+    .h5-tree summary {
       cursor: pointer;
       list-style: none;
-    }}
-    .h5-tree summary::-webkit-details-marker {{
-      display: none;
-    }}
-    .h5-branch > summary::before {{
-      content: "▾";
-      color: var(--h5-muted);
-      display: inline-block;
-      width: 1rem;
-    }}
-    .h5-branch:not([open]) > summary::before {{
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .h5-tree summary::-webkit-details-marker { display: none; }
+
+    /* collapse/expand triangle on the <details> element */
+    .h5-branch > summary::before {
       content: "▸";
-    }}
-    .h5-group {{
-      color: var(--h5-group);
-      font-weight: 700;
-    }}
-    .h5-dataset {{
-      color: var(--h5-dataset);
-      font-weight: 700;
-    }}
-    .h5-meta {{
       color: var(--h5-muted);
-      font-weight: 500;
-    }}
-        .h5-attrs-inline, .h5-attrs-list {{
-            margin-top: 0.15rem;
-            color: var(--h5-attrs);
-            margin-left: 1rem; /* align attrs with nested data children */
-        }}
-    .h5-attrs-inline {{
+      width: 0.9rem;
+      display: inline-block;
+    }
+    .h5-branch[open] > summary::before { content: "▾"; }
+
+    .h5-group   { color: var(--h5-group);   font-weight: 700; }
+    .h5-dataset { color: var(--h5-dataset); font-weight: 700; }
+    .h5-meta    { color: var(--h5-muted);   font-weight: 400; }
+
+    /* attributes */
+    .h5-attrs-inline, .h5-attrs-list {
+      color: var(--h5-attrs);
+      margin-top: 0.1rem;
+      margin-left: 1.1rem;
+    }
+    .h5-attrs-inline {
       display: grid;
       grid-template-columns: max-content 1fr;
-      column-gap: 0.45rem;
-      align-items: start;
-    }}
-    .h5-attrs-prefix {{
-      white-space: nowrap;
-    }}
-    .h5-attrs-content {{
-      min-width: 0;
-      overflow-wrap: anywhere;
-    }}
-    .h5-node-ref {{
-      color: var(--h5-node-ref);
-      font-weight: 700;
-    }}
-    .h5-attr-key {{
-      color: var(--h5-attr-key);
-      font-weight: 700;
-    }}
-    .h5-attr-value {{
-      color: var(--h5-attr-value);
-    }}
-    .h5-array-shape {{
-      color: var(--h5-muted);
-      font-weight: 500;
-    }}
-    .h5-root {{
-      color: var(--h5-root);
-      font-weight: 800;
-    }}
-  </style>
-  <div class="h5-root">/</div>
-  {root_attrs_html}
-  <ul>
-    {''.join(children)}
-  </ul>
-</div>
-""".strip()
+      column-gap: 0.4rem;
+    }
+    .h5-attrs-prefix  { white-space: nowrap; }
+    .h5-attrs-content { min-width: 0; overflow-wrap: anywhere; }
+    .h5-node-ref      { color: var(--h5-node-ref); font-weight: 700; }
+    .h5-attr-key      { color: var(--h5-attr-key);  font-weight: 700; }
+    .h5-attr-value    { color: var(--h5-attr-value); }
+    .h5-array-shape   { color: var(--h5-muted); }
+
+    /* root label */
+    .h5-root { color: var(--h5-root); font-weight: 800; }
+
+    /* global toolbar */
+    .h5-toolbar {
+      margin-bottom: 0.5rem;
+      display: flex;
+      gap: 0.4rem;
+      flex-wrap: wrap;
+    }
+
+    /* shared button style */
+    .h5-btn, .h5-lvl-btn {
+      font-family: inherit;
+      font-size: 11px;
+      padding: 1px 7px;
+      border-radius: 4px;
+      border: 1px solid var(--h5-btn-border);
+      background: var(--h5-btn-bg);
+      color: var(--h5-btn-fg);
+      cursor: pointer;
+      line-height: 1.6;
+    }
+    .h5-btn:hover, .h5-lvl-btn:hover { opacity: 0.75; }
+
+    /* level buttons sit inline next to group label; don't inherit summary colour */
+    .h5-level-btns {
+      display: inline-flex;
+      gap: 3px;
+      vertical-align: middle;
+    }
+    /* prevent level-btn click from toggling the parent details */
+    .h5-level-btns button { pointer-events: all; }
+    </style>
+    """).strip()
+
+    toolbar = (
+        f"<div class='h5-toolbar'>"
+        f"<button class='h5-btn' onclick=\"h5All('{uid}', true)\">⊞ Expand all</button>"
+        f"<button class='h5-btn' onclick=\"h5All('{uid}', false)\">⊟ Collapse all</button>"
+        f"</div>"
+    )
+
+    html_output = (
+        f"{js}\n"
+        f"<div class='h5-tree' id='{uid}'>\n"
+        f"{css}\n"
+        f"{toolbar}"
+        f"<div class='h5-root'>/</div>\n"
+        f"{root_attrs_html}\n"
+        f"<ul data-depth='1'>\n"
+        f"{children_html}\n"
+        f"</ul>\n"
+        f"</div>"
+    )
 
     if display_output:
         try:
-            from IPython.display import HTML, display
-            display(HTML(html_output))
+            from IPython.display import HTML, display as ipy_display
+            ipy_display(HTML(html_output))
         except ImportError:
             pass
 

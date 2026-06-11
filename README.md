@@ -37,6 +37,11 @@ legacy input `/data` is copied to `/raw/spad`, legacy
 `/data_channels_extra` is copied to `/raw/aux`, and old configuration groups
 are preserved under `/raw/legacy`. Routine analysis metadata is normalized
 under `/raw/metadata`, `/calibration/metadata`, and `/output/<run>/metadata`.
+Per-channel virtual datasets are grouped by source kind under
+`/output/virtual_channels/<kind>/channel_<index>` for `spad`, `aux`, and
+`analog` payloads. Use `load_raw(...)` for `/raw/spad`, `/raw/aux`, or
+`/raw/analog`, and use `load_virtual_channel(...)` instead of hard-coding
+virtual channel paths.
 
 ## Custom Fit Models
 

@@ -53,6 +53,17 @@ Root rule:
   /configurationFPGA, /configurationGUI_beforeStart, or
   /configurationSpadFCSmanager at the root in 0.0.6 files.
 
+Optional path rule:
+  Attributes that point to optional groups or datasets use an empty string when
+  the target is absent. Optional groups and datasets are omitted when absent.
+  Required path attributes must point to an existing object; readers should
+  treat a missing required target as a schema error.
+
+Output absence rule:
+  If contains_output = False, output_path may still reserve "/output", but the
+  /output group may be absent. Readers should check contains_output and the
+  existence of /output before loading derived products.
+
 
 /raw
 ----
@@ -131,6 +142,7 @@ Shape:
 Attrs:
   data_role = "auxiliary_digital_counts"
   source_input_path = "/data_channels_extra"
+  actual_source_path = "<actual source dataset path copied>"
   source_fifo = "FIFO"
   source_key = "data_channels_extra"
   units = "counts"
@@ -140,6 +152,46 @@ Attrs:
   metadata_path = "/raw/metadata"
   legacy_metadata_path = "/raw/legacy"
   calibration_result_path = "/calibration/results/aux"
+  shape_json = "[...]"
+  dtype_preserved_from_source = True
+
+
+/raw/analog
+-----------
+
+Contents:
+  Optional analog FIFO samples copied from old /data_analog.
+
+Shape:
+  Same non-channel dimensions as /raw/spad when produced by the same
+  acquisition, with final axis analog_channel.
+
+Attrs:
+  data_role = "analog_fifo"
+  source_input_path = "/data_analog"
+  actual_source_path = "<actual source dataset path copied>"
+  source_fifo = "FIFOAnalog"
+  source_key = "data_analog"
+  units = "adc_counts"
+  adc_calibration_formula = "voltage_v = adc_offset_v + adc_slope_v_per_adc_unit * adc_counts"
+  adc_offset_v = <float or NaN>
+  adc_slope_v_per_adc_unit = <float or NaN>
+  adc_channel_offset_v_json = "[NaN, NaN, ...]"
+  adc_channel_slope_v_per_adc_unit_json = "[NaN, NaN, ...]"
+  axis_order = "repetition,z,y,x,time_bin,analog_channel"
+  time_axis_path = "/raw/axes/analog_time_ns"
+  channel_axis_path = "/raw/axes/analog_channel_index"
+  metadata_path = "/raw/metadata"
+  legacy_metadata_path = "/raw/legacy"
+  calibration_result_path = ""
+  shape_json = "[...]"
+  dtype_preserved_from_source = True
+
+  ADC calibration:
+    Analog payload values are stored as raw ADC counts by default. The scalar
+    offset/slope attrs are NaN until calibrated. Per-channel JSON attrs have
+    one value per analog channel; common two-channel analog payloads therefore
+    default to two NaN values.
 
 
 /raw/metadata
@@ -196,6 +248,12 @@ Purpose:
   aux_channel_count = <int or 0>
   analog_channel_count = <int or 0>
   metadata_warnings_json = "[]"
+
+Timing attr meaning:
+  time_bin_ns is the effective digital/output histogram bin width used by
+  calibrated and output products. digital_time_bin_ns is the raw digital FIFO
+  bin width. analog_time_bin_ns is independent and meaningful only when
+  /raw/analog exists.
 
 Recommended subgroups:
 
@@ -447,6 +505,7 @@ Core datasets under /calibration/results/<product>:
   fit/tau_err_ns
   fit/tau_reference_ns
   fit/residual_error
+    attrs: metric = "rmse_normalized_histograms"
   fit/irf_type
   fit/parameter_names
   fit/parameters
@@ -464,36 +523,74 @@ Purpose:
   inspect /output/<run_id>/metadata, /output/<run_id>/axes, and products without
   parsing /raw/legacy.
 
-/output.attrs:
-  description = "Derived analysis outputs. Measured payload is stored under /raw."
-  source_data_path = "/raw/spad"
-  source_aux_data_path = "/raw/aux or empty string"
-  metadata_path = "/output/metadata"
-  source_metadata_path = "/raw/metadata"
-  source_axes_path = "/raw/axes"
-  legacy_path = "/raw/legacy"
-  default = "<default run id or empty string>"
-  run_count = <int>
-  default_metadata_path = "/output/<default_run_id>/metadata or empty string"
-  default_axes_path = "/output/<default_run_id>/axes or empty string"
+  Top-level /output children are the output inventory. The collection can
+  contain /output/virtual_channels, image output run groups, and trace output
+  run groups. Readers should use /output.keys() to list available outputs,
+  then inspect each child group's attrs, metadata, axes, and products. Readers
+  should identify image runs by output_type = "image_tool" on a group and
+  trace products by output_type = "trace" on
+  /output/<trace_run_id>/products/trace.
 
-/output/metadata.attrs:
-  description = "Normalized metadata for the output collection."
-  source_data_path = "/raw/spad"
-  source_aux_data_path = "/raw/aux or empty string"
-  source_metadata_path = "/raw/metadata"
-  source_axes_path = "/raw/axes"
-  default_run_id = "<default run id or empty string>"
-  default_run_metadata_path = "/output/<default_run_id>/metadata or empty string"
-  default_run_axes_path = "/output/<default_run_id>/axes or empty string"
-  run_count = <int>
+/output.attrs:
+  default = "sum_channels_001"
+  default_irf_trace_id = "sum_irf_001"
+  default_ref_trace_id = "sum_ref_001"
+
+  Default run selection:
+    /output.attrs is a small index only. If /output/sum_channels_001 is
+    present, default points to that channel-skew-corrected aligned run. The
+    uncorrected sum remains available as
+    /output/sum_channels_without_corrections_001. If a default target is absent,
+    the corresponding attr is an empty string.
 
 Virtual channel outputs:
   Purpose:
-    This is a view of raw data per single channel.
+    Typed HDF5 virtual datasets exposing one source channel without copying raw
+    data.
   /output/virtual_channels
-  /output/virtual_channels/data_channel_<index>
-  /output/virtual_channels/data_aux_channel_<index>
+    attrs:
+      description = "Typed virtual datasets mapping individual source channels."
+      spad_source_data_path = "/raw/spad or empty string"
+      aux_source_data_path = "/raw/aux or empty string"
+      analog_source_data_path = "/raw/analog or empty string"
+      spad_channel_count = <int or 0>
+      aux_channel_count = <int or 0>
+      analog_channel_count = <int or 0>
+      source_axis_order = "<source axis order for first available source>"
+      virtual_axis_order = "<channel-dropped axis order for first available source>"
+      naming_rule = "<kind>/channel_<channel_index>"
+      kind_groups_json = "[\"spad\", \"aux\", \"analog\"]"
+
+  /output/virtual_channels/spad
+  /output/virtual_channels/aux
+  /output/virtual_channels/analog
+    Optional typed groups, present only when the corresponding source payload
+    exists. Group attrs include:
+      virtual_channel_type = "spad" | "aux" | "analog"
+      source_data_path = "/raw/spad" | "/raw/aux" | "/raw/analog"
+      source_channel_axis = -1
+      source_channel_axis_path = "/raw/axes/<channel axis>"
+      channel_count = <int>
+      source_axis_order
+      virtual_axis_order
+      data_layout = "raster_6d" | "circular_8d"
+      units = "counts" | "adc_counts"
+      naming_rule = "channel_<channel_index>"
+
+  /output/virtual_channels/<kind>/channel_<index>
+    Virtual dataset with shape equal to the source payload shape without the
+    final channel axis. Dataset attrs include:
+      virtual_channel_name = "channel_<index>"
+      virtual_channel_type = "spad" | "aux" | "analog"
+      virtual_source_file = "."
+      source_data_path = "/raw/spad" | "/raw/aux" | "/raw/analog"
+      source_channel_index = <int>
+      source_channel_axis = -1
+      source_channel_axis_path = "/raw/axes/<channel axis>"
+      source_selection = "[:, ..., <index>]"
+      axis_order = "<channel-dropped axis order>"
+      units = "counts" | "adc_counts"
+      is_virtual_dataset = True
 
 Output runs:
 
@@ -507,11 +604,11 @@ Output runs:
       source_calibration_path = "/calibration/results/spad"
       source_aux_calibration_path = "/calibration/results/aux or empty string"
       source_metadata_path = "/raw/metadata"
-      source_timing_metadata_path = "/raw/metadata/acquisition/timing or calibration fallback"
+      source_timing_metadata_path = "/raw/metadata/acquisition/timing, legacy /metadata/acquisition/timing, /calibration/results/<product>, or empty string"
       source_axes_path = "/raw/axes"
       input_axis_order = "repetition,z,y,x,time_bin,channel"
       output_axis_order = "repetition,z,y,x,time_bin" or 8D equivalent
-      output_data_path = "/output/<run_id>/products/image"
+      output_data_path = "/output/<run_id>/products/spad"
       time_axis_source = "/raw/axes/digital_time_ns"
       time_axis_path = "/output/<run_id>/axes/time_ns"
 
@@ -523,6 +620,10 @@ Output runs:
     data_layout = "raster_6d" | "circular_8d"
     nrep, nz, ny, nx = <int>
     output_nrep, output_nz, output_ny, output_nx = <int>
+    circular_repetition_count = <int; 1 for raster_6d>
+    circular_point_count = <int; 1 for raster_6d>
+    output_circular_repetition_count = <int; 1 for raster_6d>
+    output_circular_point_count = <int; 1 for raster_6d>
     range_x_um, range_y_um, range_z_um = <float or NaN>
     offset_x_um, offset_y_um, offset_z_um = <float or NaN>
     pixel_size_x_um, pixel_size_y_um, pixel_size_z_um = <float or NaN>
@@ -547,10 +648,12 @@ Output runs:
 
   /output/<run_id>/axes:
     x_um, y_um, z_um, repetition_index, time_ns
+    circular_repetition_index and circular_point_index are present for
+    circular_8d outputs.
     Spatial axes use the same centered coordinate rule as /raw/axes.
 
-  /output/<run_id>/products/image
-    Main output product.
+  /output/<run_id>/products/spad
+    Main SPAD output product.
     attrs include:
       source_data_path
       source_calibration_path
@@ -561,11 +664,69 @@ Output runs:
       laser_frequency_mhz
       laser_period_ns
 
-Current writer products:
-  /output/sum_channels_without_corrections_001/products/image
-  /output/sum_channels_without_corrections_001/products/image_aux
-  /output/sum_channels_001/products/image
-  /output/sum_channels_001/products/image_aux
+  /output/<run_id>/products/aux
+    Optional auxiliary output product, present when aux data are included.
+    Attrs mirror products/spad with:
+      source_data_path = "/raw/aux"
+      source_calibration_path = "/calibration/results/aux or empty string"
+      selected_channels_json = "[aux channel indices]"
+      channel_aggregation = "sum_channels_without_corrections" | "sum_channels_with_skew_correction"
+
+  /output/<run_id>/intermediates/<name>
+    Optional intermediate datasets needed to interpret the output. APR outputs
+    store shift vectors at:
+      /output/<apr_run_id>/intermediates/shift_vectors
+    with attrs:
+      axes = "detector_channel,shift_component"
+      shift_components_json = "[\"dy\", \"dx\"]"
+    APR run attrs and /output/<apr_run_id>/metadata.attrs include:
+      shift_vectors_path = "/output/<apr_run_id>/intermediates/shift_vectors"
+
+Writer helper behavior:
+  write_h5_output_run(...) appends one /output/<run_id> analysis run by
+  default. If the requested run id exists, it writes the next numbered id such
+  as apr_002 unless output_key_overwrite=True, in which case only the requested
+  /output/<run_id> child is replaced. mode="copy" writes to a copied source
+  file. mode="outputs_only" writes a self-describing HDF5 fragment containing
+  root attrs plus /output, without /raw or /calibration.
+
+Top-level trace outputs:
+
+  /output/sum_irf_001
+  /output/sum_ref_001
+    Numbered 1D traces produced from aligned calibration traces and the same
+    channel-skew shifts used by /output/sum_channels_001/products/spad.
+    /output attrs name the default numbered trace for each trace type, so
+    readers can select sum_irf_002 or sum_ref_002 later
+    without changing the top-level object layout.
+    run attrs include:
+      output_id
+      output_type = "trace_tool"
+      trace_kind = "sum_irf_trace" | "sum_reference_trace"
+      source_output_run_id = "sum_channels_001"
+      source_output_run_path = "/output/sum_channels_001"
+      source_trace_path = "/calibration/results/spad/aligned/irf_trace or reference_trace"
+      output_data_path = "/output/<trace_run_id>/products/trace"
+      metadata_path = "/output/<trace_run_id>/metadata"
+      time_axis_path = "/output/<trace_run_id>/axes/time_ns"
+
+    products/trace attrs include:
+      output_type = "trace"
+      trace_kind = "sum_irf_trace" | "sum_reference_trace"
+      source_trace_path = "/calibration/results/spad/aligned/irf_trace or reference_trace"
+      metadata_path = "/output/<trace_run_id>/metadata"
+      time_axis_path = "/output/<trace_run_id>/axes/time_ns"
+      selected_channels_json
+      channel_skew_path
+      channel_skew_json
+
+Current writer outputs:
+  /output/sum_channels_without_corrections_001/products/spad
+  /output/sum_channels_without_corrections_001/products/aux            conditional on aux data
+  /output/sum_channels_001/products/spad
+  /output/sum_channels_001/products/aux                                conditional on aux data and aux channel skew
+  /output/sum_irf_001/products/trace                                  conditional on aligned/irf_trace
+  /output/sum_ref_001/products/trace                                   conditional on aligned/reference_trace
 
 
 Reader behavior
@@ -580,7 +741,6 @@ New readers should prefer:
   /calibration/metadata
   /calibration/axes
   /calibration/results/<product>
-  /output/metadata
   /output/<run_id>/metadata
   /output/<run_id>/axes
   /output/<run_id>/products/*
