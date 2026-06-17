@@ -2,8 +2,20 @@
 
 Python utilities for reading and calibrating BrightEyes MCS HDF5 files.
 
-This package is structured with a `src/` layout so it can be published on PyPI
-as `brighteyes-mcs-file` and imported as `brighteyes_mcs_file`.
+Install `brighteyes-mcs-file` from PyPI:
+
+    pip install brighteyes-mcs-file
+
+You can also install the latest development version directly from GitHub:
+
+    pip install git+https://github.com/VicidominiLab/BrightEyes-MCS-File
+
+In case of local development:
+    
+    git clone https://github.com/VicidominiLab/BrightEyes-MCS-File.git
+    cd BrightEyes-MCS-File
+    pip install -e .
+
 
 ## Install for Development
 
