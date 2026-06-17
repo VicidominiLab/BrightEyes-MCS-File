@@ -426,7 +426,15 @@ Purpose:
   created_by_version = "<package version>"
   created_at_iso8601 = "<timestamp>"
   source_data_file = "<input measurement file>"
+  source_data_file_sha256 = "<sha256 hash of concatenated channel fingerprints>"
+  source_data_file_hash_algorithm = "sha256"
+  source_data_file_hash_source_paths_json = "[\"/raw/spad\", \"/raw/aux\", ...]"
+  source_data_file_hash_channel_counts_json = "[25, 2, ...]"
   source_reference_file = "<reference file>"
+  source_reference_file_sha256 = "<sha256 hash of concatenated channel fingerprints>"
+  source_reference_file_hash_algorithm = "sha256"
+  source_reference_file_hash_source_paths_json = "[\"/raw/spad\", \"/raw/aux\", ...]"
+  source_reference_file_hash_channel_counts_json = "[25, 2, ...]"
   output_file = "<new output file>"
   payload_group = "/raw"
   metadata_path = "/calibration/metadata"
@@ -452,6 +460,11 @@ Calibration inputs:
     attrs:
       source_reference_path = "<reference source dataset>"
       axes = "time_bin,channel"
+
+  /calibration/inputs/<product>/reference_fingerprint
+    shape = (channel,)
+    microscopy fingerprint vector: source reference data summed along every
+    axis except the channel axis. This is not a file-identity hash.
 
 Calibration result groups:
 
@@ -618,6 +631,7 @@ Output runs:
     acquisition_mode = "normal" | "dfd"
     timing_reference = "pixel_dwell" | "laser_period"
     data_layout = "raster_6d" | "circular_8d"
+
     nrep, nz, ny, nx = <int>
     output_nrep, output_nz, output_ny, output_nx = <int>
     circular_repetition_count = <int; 1 for raster_6d>
@@ -645,6 +659,13 @@ Output runs:
     selected_channel_count = <int>
     selected_channels_json = "[...]"
     channel_aggregation = "sum_channels_without_corrections" | "sum_channels_with_skew_correction"
+
+  /output/<run_id>/provenance.attrs:
+    source_file = "<source HDF5 file used for this output run>"
+    source_file_sha256 = "<sha256 hash of concatenated channel fingerprints>"
+    source_file_hash_algorithm = "sha256"
+    source_file_hash_source_paths_json = "[\"/raw/spad\", \"/raw/aux\", ...]"
+    source_file_hash_channel_counts_json = "[25, 2, ...]"
 
   /output/<run_id>/axes:
     x_um, y_um, z_um, repetition_index, time_ns

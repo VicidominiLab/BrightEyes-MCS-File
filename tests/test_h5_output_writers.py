@@ -4,6 +4,7 @@ import h5py
 import numpy as np
 
 from brighteyes_mcs_file import H5OutputProduct, write_h5_output_run
+from brighteyes_mcs_file.h5_file_hash import channel_fingerprint_file_hash
 
 
 def _source_file(path):
@@ -11,6 +12,7 @@ def _source_file(path):
         handle.attrs["data_format_version"] = "0.0.6"
         raw = handle.create_group("raw")
         raw.create_dataset("spad", data=np.arange(4).reshape(1, 1, 1, 1, 2, 2))
+        raw.create_dataset("aux", data=np.arange(4, 8).reshape(1, 1, 1, 1, 2, 2))
         handle.create_group("calibration")
     return path
 
@@ -41,6 +43,14 @@ def test_write_h5_output_run_appends_and_versions_existing_run(tmp_path):
         assert handle["output"].attrs["default"] == ""
         assert "apr_001" in handle["output"]
         assert "apr_002" in handle["output"]
+        provenance = handle["output/apr_001/provenance"].attrs
+        assert provenance["source_file"] == str(source_path)
+        assert len(provenance["source_file_sha256"]) == 64
+        assert provenance["source_file_hash_algorithm"] == "sha256"
+        assert json.loads(provenance["source_file_hash_source_paths_json"]) == [
+            "/raw/spad",
+            "/raw/aux",
+        ]
         np.testing.assert_array_equal(
             handle["output/apr_001/products/spad"][...],
             np.ones((2, 3)),
@@ -110,7 +120,25 @@ def test_write_h5_output_run_copy_and_outputs_only_modes(tmp_path):
         assert handle.attrs["data_format_version"] == "0.0.6"
         assert handle.attrs["contains_output"]
         assert handle.attrs["source_file"] == str(source_path)
+        assert "output/apr_001/provenance" in handle
+        assert len(handle["output/apr_001/provenance"].attrs["source_file_sha256"]) == 64
         assert "output/apr_001/products/spad" in handle
+
+
+def test_channel_fingerprint_file_hash_includes_aux_channels(tmp_path):
+    path_a = _source_file(tmp_path / "sample_a.h5")
+    path_b = _source_file(tmp_path / "sample_b.h5")
+
+    with h5py.File(path_b, "a") as handle:
+        handle["raw/aux"][0, 0, 0, 0, 0, 0] += 1
+
+    with h5py.File(path_a, "r") as handle_a, h5py.File(path_b, "r") as handle_b:
+        hash_a = channel_fingerprint_file_hash(handle_a)
+        hash_b = channel_fingerprint_file_hash(handle_b)
+
+    assert hash_a["source_paths"] == ["/raw/spad", "/raw/aux"]
+    assert hash_a["channel_counts"] == [2, 2]
+    assert hash_a["hash"] != hash_b["hash"]
 
 
 def test_write_h5_output_run_apr_shift_vector_metadata(tmp_path):

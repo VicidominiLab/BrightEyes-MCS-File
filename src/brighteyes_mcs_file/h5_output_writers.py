@@ -1,4 +1,11 @@
-"""Writers for BrightEyes HDF5 output runs."""
+"""Helpers for adding BrightEyes analysis outputs to current-schema HDF5 files.
+
+The current schema keeps measured data under ``/raw`` and calibration artifacts
+under ``/calibration``. Derived notebook and tool results belong under
+``/output/<run_id>``. This module provides the small writer used by examples and
+analysis scripts so those results can be copied or appended without recreating
+the full calibrated file layout by hand.
+"""
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,6 +16,8 @@ import shutil
 
 import h5py
 import numpy as np
+
+from .h5_file_hash import channel_fingerprint_file_hash_attrs
 
 try:
     from importlib.metadata import PackageNotFoundError, version
@@ -41,7 +50,13 @@ __all__ = [
 
 @dataclass
 class H5OutputProduct:
-    """Dataset payload and metadata for an ``/output/<run_id>`` collection."""
+    """Dataset payload and metadata for one output product.
+
+    ``name`` is relative to ``/output/<run_id>/products`` or to an intermediate
+    collection. It may include slashes, for example ``"fit_maps/tau"``.
+    ``attrs`` should carry the schema-facing context readers need, such as
+    source paths, units, data role, and axis order.
+    """
 
     name: str
     data: object
@@ -74,6 +89,14 @@ def _json_default(value):
 
 
 def _attr_value(value):
+    """Return an HDF5-compatible attribute value.
+
+    h5py attributes cannot store arbitrary Python containers directly. Lists,
+    tuples, dicts, NumPy arrays, and NumPy scalars are converted to plain JSON
+    strings so downstream readers can decode them without relying on pickle or
+    notebook-specific Python objects.
+    """
+
     if value is None:
         return ""
     if isinstance(value, Path):
@@ -84,6 +107,8 @@ def _attr_value(value):
 
 
 def _render_templates(value, run_id, run_path):
+    """Replace run placeholders inside attrs, metadata, and product names."""
+
     if isinstance(value, str):
         return value.replace("{run_id}", run_id).replace("{run_path}", run_path)
     if isinstance(value, Path):
@@ -141,7 +166,7 @@ def _default_output_path(source_path, suffix):
 
 
 def ensure_output_group(handle, output_key=BRIGHTEYES_H5_OUTPUT_PATH):
-    """Return the output group and ensure its small default index attrs exist."""
+    """Return ``/output`` and ensure its small default-index attrs exist."""
 
     group = handle.require_group(_normalize_output_key(output_key))
     for key, value in OUTPUT_DEFAULT_ATTRS.items():
@@ -185,6 +210,13 @@ def resolve_output_run_id(output_group, run_id, output_key_overwrite=False):
 
 
 def _normalize_products(products):
+    """Normalize the required product collection for ``/products``.
+
+    The public writer accepts either explicit ``H5OutputProduct`` objects or a
+    simple ``{name: data}`` mapping. Explicit products are preferred for
+    schema-compliant exports because they can carry per-dataset attrs.
+    """
+
     if isinstance(products, dict):
         products = [
             value if isinstance(value, H5OutputProduct) else H5OutputProduct(name, value)
@@ -215,6 +247,8 @@ def _normalize_products(products):
 
 
 def _normalize_collection(collection):
+    """Normalize optional collections such as axes and intermediates."""
+
     if collection is None:
         return []
     if isinstance(collection, dict):
@@ -226,6 +260,8 @@ def _normalize_collection(collection):
 
 
 def _dataset_kwargs(product, array):
+    """Build creation kwargs while avoiding compression for scalar datasets."""
+
     kwargs = {"data": array}
     if np.shape(array) != ():
         if product.chunks is not None:
@@ -236,6 +272,8 @@ def _dataset_kwargs(product, array):
 
 
 def _write_dataset(group, product, attrs=None):
+    """Create one dataset and attach common attrs before product-specific attrs."""
+
     name = str(product.name).strip("/")
     if "/" in name:
         parent_path, dataset_name = name.rsplit("/", 1)
@@ -254,12 +292,20 @@ def _write_dataset_collection(group, collection, common_attrs=None):
 
 
 def _prepare_target_file(source_path, output_path, mode):
+    """Return the HDF5 file path to open for the requested write mode."""
+
     source_path = Path(source_path)
     if mode == "append":
+        # Append writes into the source file itself. Passing a different
+        # output_path would be ambiguous, so require callers to use mode="copy"
+        # for the first step of an exported pipeline.
         if output_path is not None and Path(output_path) != source_path:
             raise ValueError("output_path is not used with mode='append'")
         return source_path
     if mode == "copy":
+        # Copy keeps /raw and /calibration intact, then writes the first
+        # /output run into the copied file. Later pipeline steps append to that
+        # copied file.
         target = Path(output_path) if output_path is not None else _default_output_path(
             source_path,
             "_with_output",
@@ -267,6 +313,9 @@ def _prepare_target_file(source_path, output_path, mode):
         shutil.copy2(source_path, target)
         return target
     if mode == "outputs_only":
+        # Fragment mode is useful for derived products that intentionally do
+        # not carry the measured payload. The root attrs still make the file
+        # identifiable as a BrightEyes output fragment.
         return Path(output_path) if output_path is not None else _default_output_path(
             source_path,
             "_outputs",
@@ -276,6 +325,8 @@ def _prepare_target_file(source_path, output_path, mode):
 
 
 def _root_attrs(source_path, mode):
+    """Root attrs that mark a file as containing current-schema outputs."""
+
     attrs = {
         "contains_output": True,
         "output_path": BRIGHTEYES_H5_OUTPUT_PATH,
@@ -290,6 +341,11 @@ def _root_attrs(source_path, mode):
             }
         )
     return attrs
+
+
+def _source_file_hash_attrs(source_path):
+    with h5py.File(source_path, "r") as handle:
+        return channel_fingerprint_file_hash_attrs(handle, prefix="source_file")
 
 
 def write_h5_output_run(
@@ -311,7 +367,34 @@ def write_h5_output_run(
     intermediates=None,
     set_default=False,
 ):
-    """Write one current-schema BrightEyes analysis run under ``/output``."""
+    """Write one current-schema BrightEyes analysis run under ``/output``.
+
+    Parameters
+    ----------
+    source_path:
+        Existing HDF5 file to append to, copy from, or reference for an
+        ``outputs_only`` fragment.
+    run_id:
+        Requested child name under ``/output``. Existing names are versioned
+        unless ``output_key_overwrite`` is true.
+    products:
+        Datasets written under ``/output/<run_id>/products``. Use
+        ``H5OutputProduct`` when product-level attrs such as ``data_role``,
+        ``axis_order``, ``source_data_path``, and units are known.
+    mode:
+        ``"copy"`` for the first exported pipeline step, ``"append"`` for later
+        steps in the same file, or ``"outputs_only"`` for a standalone output
+        fragment.
+    axes, intermediates:
+        Optional dataset collections written under ``axes`` and
+        ``intermediates``. They accept the same product objects as
+        ``products``.
+
+    Returns
+    -------
+    tuple[str, str]
+        The path actually written and the resolved run id.
+    """
 
     mode = str(mode)
     if mode not in VALID_WRITE_MODES:
@@ -319,6 +402,7 @@ def write_h5_output_run(
         raise ValueError(f"mode must be one of {allowed}; got {mode!r}")
 
     products = _normalize_products(products)
+    source_hash_attrs = _source_file_hash_attrs(source_path)
     target_path = _prepare_target_file(source_path, output_path, mode)
     h5_mode = "w" if mode == "outputs_only" else "a"
 
@@ -370,6 +454,15 @@ def write_h5_output_run(
 
         inputs_group = run_group.create_group("inputs")
         write_attrs(inputs_group, rendered_inputs)
+
+        provenance_group = run_group.create_group("provenance")
+        write_attrs(
+            provenance_group,
+            {
+                "source_file": str(Path(source_path)),
+                **source_hash_attrs,
+            },
+        )
 
         metadata_group = run_group.create_group("metadata")
         write_attrs(metadata_group, rendered_metadata)

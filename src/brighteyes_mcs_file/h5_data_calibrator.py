@@ -18,6 +18,7 @@ from tqdm.auto import tqdm
 from .alignment import Alignment
 from . import mcs
 from .channel_skew_estimator import estimate_channel_skew
+from .h5_file_hash import channel_fingerprint_file_hash_attrs
 from .h5_output_writers import ensure_output_group
 
 try:
@@ -2034,6 +2035,11 @@ class H5DataCalibrator:
                 },
             )
             provenance_group = calibration_group.create_group("provenance")
+            data_file_hash_attrs = channel_fingerprint_file_hash_attrs(data_handle, prefix="source_data_file")
+            reference_file_hash_attrs = channel_fingerprint_file_hash_attrs(
+                reference_handle,
+                prefix="source_reference_file",
+            )
             self._set_group_attrs(
                 provenance_group,
                 {
@@ -2042,6 +2048,8 @@ class H5DataCalibrator:
                     "created_at_iso8601": self._utc_now(),
                     "source_data_file": str(self.data_path),
                     "source_reference_file": str(self.reference_path),
+                    **data_file_hash_attrs,
+                    **reference_file_hash_attrs,
                     "output_file": str(output_path),
                     "source_data_format_version": data_handle.attrs.get("data_format_version", "unknown"),
                     "source_reference_format_version": reference_handle.attrs.get("data_format_version", "unknown"),
@@ -3052,8 +3060,7 @@ class H5OutputBuilder:
             provenance_group,
             {
                 "command": "H5OutputBuilder.build",
-                "input_file_fingerprint": "",
-                "calibration_fingerprint": "",
+                **self._source_file_hash_attrs(run_group.file),
             },
         )
         views_group = run_group.create_group("views")
@@ -3062,6 +3069,12 @@ class H5OutputBuilder:
     def _default_output_path(self):
         suffix = self.data_path.suffix or ".h5"
         return self.data_path.with_name(f"{self.data_path.stem}_output{suffix}")
+
+    def _source_file_hash_attrs(self, handle=None):
+        if handle is not None:
+            return channel_fingerprint_file_hash_attrs(handle, prefix="source_file")
+        with h5py.File(self.data_path, "r") as source_handle:
+            return channel_fingerprint_file_hash_attrs(source_handle, prefix="source_file")
 
     def _prepare_output_file(self):
         if self.in_place or self.output_path is None:
@@ -4850,6 +4863,7 @@ def show_h5_structure_html(
     *,
     include_attrs: bool = True,
     attrs_inline: bool = True,
+    show_full_path: bool = True,
     max_attr_len: int = 200,
     display_output: bool = True,
 ) -> str:
@@ -4869,6 +4883,8 @@ def show_h5_structure_html(
         Include group and dataset attributes.
     attrs_inline : bool, default True
         Render all attributes for a node on one line.
+    show_full_path : bool, default False
+        If *True*, render the full HDF5 path for each group and dataset.
     max_attr_len : int, default 200
         Truncate attribute value reprs longer than this.
     display_output : bool, default True
@@ -4920,16 +4936,28 @@ def show_h5_structure_html(
         )
         return f"<ul class='h5-attrs-list'>{rows}</ul>"
 
+    def _render_full_path(path: str) -> str:
+        if not show_full_path:
+            return ""
+        full_path = "/" if not path else path if path.startswith("/") else f"/{path}"
+        return f"<span class='h5-full-path'>{escape(full_path)}</span>"
+
     def _render_node(name: str, obj, depth: int) -> str:
         node_name = name.split("/")[-1] if name else "/"
+        full_path_html = _render_full_path(name)
 
         if isinstance(obj, h5py.Dataset):
             attrs_html = _render_attrs(obj, node_name)
             return (
                 f"<li data-depth='{depth}' class='h5-li-dataset'>"
+                f"<div class='h5-node-line'>"
+                f"<span class='h5-node-main'>"
                 f"<span class='h5-dataset'>{escape(node_name)}</span> "
                 f"<span class='h5-meta'>shape={escape(str(obj.shape))} "
                 f"dtype={escape(str(obj.dtype))}</span>"
+                f"</span>"
+                f"{full_path_html}"
+                f"</div>"
                 f"{attrs_html}"
                 f"</li>"
             )
@@ -4937,7 +4965,11 @@ def show_h5_structure_html(
         # Group
         attrs_html = _render_attrs(obj, node_name)
         children_html = "".join(
-            _render_node(child_key, obj[child_key], depth + 1)
+            _render_node(
+                f"{name}/{child_key}" if name else child_key,
+                obj[child_key],
+                depth + 1,
+            )
             for child_key in obj.keys()
         )
         children_block = f"<ul data-depth='{depth + 1}'>{children_html}</ul>" if children_html else ""
@@ -4947,10 +4979,10 @@ def show_h5_structure_html(
             f"<span class='h5-level-btns' data-depth='{depth}' data-widget='{uid}'>"
             f"<button class='h5-lvl-btn' "
             f"onclick=\"h5LevelToggle('{uid}', {depth}, true, this)\""
-            f" title='Espandi tutti i gruppi di questo livello'>▸ lvl</button>"
+            f" title='Espandi tutti i gruppi di questo livello'>▸</button>"
             f"<button class='h5-lvl-btn' "
             f"onclick=\"h5LevelToggle('{uid}', {depth}, false, this)\""
-            f" title='Comprimi tutti i gruppi di questo livello'>▾ lvl</button>"
+            f" title='Comprimi tutti i gruppi di questo livello'>▾</button>"
             f"</span>"
         )
 
@@ -4958,8 +4990,13 @@ def show_h5_structure_html(
             f"<li data-depth='{depth}' class='h5-li-group'>"
             f"<details class='h5-branch'>"  # NOT open → collapsed by default
             f"<summary>"
+            f"<span class='h5-node-line'>"
+            f"<span class='h5-node-main'>"
             f"<span class='h5-group'>{escape(node_name)}</span>/"
             f"{level_btns}"
+            f"</span>"
+            f"{full_path_html}"
+            f"</span>"
             f"</summary>"
             f"{attrs_html}"
             f"{children_block}"
@@ -5057,13 +5094,11 @@ def show_h5_structure_html(
     }
     .h5-tree li { margin: 0.2rem 0; }
 
-    /* summary: flex so label + buttons sit on one row */
+    /* summary spans the available width; inner row handles alignment */
     .h5-tree summary {
       cursor: pointer;
       list-style: none;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.4rem;
+      display: block;
     }
     .h5-tree summary::-webkit-details-marker { display: none; }
 
@@ -5079,6 +5114,29 @@ def show_h5_structure_html(
     .h5-group   { color: var(--h5-group);   font-weight: 700; }
     .h5-dataset { color: var(--h5-dataset); font-weight: 700; }
     .h5-meta    { color: var(--h5-muted);   font-weight: 400; }
+    .h5-node-line {
+      display: flex;
+      align-items: baseline;
+      gap: 0.75rem;
+      width: 100%;
+      min-width: 0;
+    }
+    .h5-node-main {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 0.35rem;
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+    .h5-full-path {
+      color: var(--h5-muted);
+      font-weight: 400;
+      margin-left: auto;
+      font-size: 0.95em;
+      text-align: right;
+      white-space: nowrap;
+      flex: 0 0 auto;
+    }
 
     /* attributes */
     .h5-attrs-inline, .h5-attrs-list {
@@ -5128,6 +5186,7 @@ def show_h5_structure_html(
       display: inline-flex;
       gap: 3px;
       vertical-align: middle;
+      flex: 0 0 auto;
     }
     /* prevent level-btn click from toggling the parent details */
     .h5-level-btns button { pointer-events: all; }
