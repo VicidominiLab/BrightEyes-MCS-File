@@ -1,0 +1,425 @@
+Future Codex request: implement BrightEyes HDF5 schema v0.1.2
+=============================================================
+
+Please implement the BrightEyes HDF5 schema v0.1.2 described in:
+
+  brighteyes_h5_schema_v0_1_2_description.txt
+
+Repositories involved:
+
+  BrightEyes-MCS:
+    /home/mdonato/myDev/BrightEyes-MCS/brighteyes_mcs/
+
+  BrightEyes-MCS-File:
+    /home/mdonato/myDev/BrightEyes-MCS-File/src/brighteyes_mcs_file/
+
+Main goal:
+  BrightEyes-MCS should write improved raw acquisition HDF5 files using schema
+  v0.1.2. BrightEyes-MCS-File, especially calibrate_h5_file, should read raw
+  acquisitions, preserve the original raw data values, and add calibration
+  data and metadata in the same schema family.
+
+
+Part 1: BrightEyes-MCS raw writer
+---------------------------------
+
+Update the BrightEyes-MCS HDF5 writer so new acquisition output files use:
+
+  / attrs:
+    data_format_version = "0.1.2"
+    schema_name = "brighteyes_mcs_h5"
+    schema_variant = "acquisition_aware"
+    file_kind = "raw_acquisition"
+    contains_calibration = False
+    raw_data_preserved = True
+    default = "/data/primary" or "/data/analog" for analog-only files
+    metadata = "/metadata"
+    axes = "/axes"
+    data = "/data"
+
+Do not write /calibration in BrightEyes-MCS raw files.
+
+Likely files to inspect and update:
+
+  /home/mdonato/myDev/BrightEyes-MCS/brighteyes_mcs/libs/h5manager.py
+  /home/mdonato/myDev/BrightEyes-MCS/brighteyes_mcs/libs/processes/acquisition_loop_process.py
+  /home/mdonato/myDev/BrightEyes-MCS/brighteyes_mcs/gui/main_window.py
+  /home/mdonato/myDev/BrightEyes-MCS/brighteyes_mcs/libs/spad_fcs_manager.py
+
+Required data paths:
+
+  /data/primary:
+    Replaces the old top-level data dataset for primary digital FIFO data.
+    This dataset is absent for analog-only raw acquisitions.
+
+  /data/extra:
+    Replaces the old top-level data_channels_extra dataset when present.
+    In BrightEyes-MCS output, /data/primary always implies /data/extra.
+    A raw file with /data/primary but no /data/extra should be treated as
+    incomplete.
+
+  /data/analog:
+    Replaces the old top-level data_analog dataset when FIFOAnalog is active.
+    This dataset can exist without /data/primary in analog-only acquisitions.
+
+Canonical data axis orders:
+
+  Non-circular acquisitions must use 6D:
+
+    (repetition, z, y, x, time_bin, channel)
+
+  Circular acquisitions must use 8D:
+
+    (repetition, z, y, x, circular_repetition, circular_point, time_bin, channel)
+
+Required behavior for circular scans:
+
+  - Use 8D datasets only when circular scan is active.
+  - Do not flatten circular_repetition * circular_point into the time axis for
+    circular acquisitions.
+  - If circular scan is inactive, use 6D datasets and do not put circular axes
+    in the data shape.
+  - If circular scan is active, write circular_repetition_count and
+    circular_point_count from the GUI/register settings.
+  - When circular scan is active, populate /axes/circular_phase_rad,
+    /axes/circular_x_um, /axes/circular_y_um, /axes/circular_z_um, and scan
+    voltage axes.
+  - Normal circular scan must be represented as:
+      acquisition_mode = "normal"
+      subpixel_scan_mode = "circular"
+    It must not be treated as DFD sync data.
+
+Required behavior for DFD:
+
+  - Keep the dataset name /data/primary. Do not create data_dfd.
+  - Represent DFD with:
+      acquisition_mode = "dfd"
+      dfd_active = True
+      timing_reference = "laser_period"
+      laser_freq_mhz
+      laser_period_ns
+      digital_time_bin_in_ns = laser_period_ns / digital_timebins_per_point
+  - Preserve raw DFD fields and bitfile information under /metadata/raw.
+  - Record metadata warnings if DFD bin counts disagree between bitfile,
+    GUI/registers, and dataset shape.
+
+Required behavior for normal timing:
+
+  - Store:
+      base_timebins_per_point
+      digital_timebins_per_point
+      analog_timebins_per_point
+      time_resolution_us
+      dwell_time_per_circular_point_us
+      pixel_dwell_time_us
+      pixel_dwell_time_in_ns
+      digital_time_bin_in_ns
+      analog_time_bin_in_ns
+  - For normal mode:
+      digital_time_bin_in_ns =
+        pixel_dwell_time_us /
+        (circular_samples_per_pixel * digital_timebins_per_point) * 1000.0
+    Equivalent:
+      dwell_time_per_circular_point_us / digital_timebins_per_point * 1000.0
+  - For analog:
+      analog_time_bin_in_ns =
+        dwell_time_per_circular_point_us / analog_timebins_per_point * 1000.0
+
+Required metadata groups:
+
+  /metadata.attrs:
+    Human-readable normalized metadata, including:
+      nx, ny, nz, nrep
+      timebins
+      laser_freq_mhz
+      laser_period_ns
+      pixel_dwell_time_us
+      pixel_dwell_time_in_ns
+      pixel_size_x_um
+      pixel_size_y_um
+      pixel_size_z_um
+      digital_time_bin_in_ns
+      analog_time_bin_in_ns
+      acquisition_mode
+      dfd_active
+      data_layout
+      subpixel_scan_mode
+      circular_active
+      circular_radius_nm
+      circular_point_count
+      circular_repetition_count
+      digital_fifo_active
+      analog_fifo_active
+      primary_present
+      extra_present
+      analog_present
+      primary_channel_count
+      extra_channel_count
+      analog_channel_count
+
+  /metadata/acquisition/scan.attrs:
+    Normalized scan and circular metadata.
+
+  /metadata/acquisition/timing.attrs:
+    Normalized timing metadata.
+
+  /metadata/acquisition/fifo.attrs:
+    FIFO activity and expected word counts.
+
+  /metadata/acquisition/analog.attrs:
+    Analog input settings.
+
+  /metadata/raw/configuration_gui.attrs:
+    Full GUI metadata snapshot.
+
+  /metadata/raw/configuration_gui_before_start.attrs:
+    Full GUI-before-start metadata snapshot, if present.
+
+  /metadata/raw/configuration_fpga.attrs:
+    Full FPGA/register metadata snapshot.
+
+  /metadata/raw/configuration_spad_fcs_manager.attrs:
+    Full SPAD/FCS manager metadata snapshot.
+
+Required axes:
+
+  /axes/repetition_index
+  /axes/z_um
+  /axes/y_um
+  /axes/x_um
+  /axes/digital_time_ns when digital data are present
+  /axes/analog_time_ns when analog data are present
+  /axes/detector_channel_index when /data/primary is present
+  /axes/extra_channel_index when /data/extra is present
+  /axes/analog_channel_index when /data/analog is present
+
+Required only when circular scanning is active:
+
+  /axes/circular_repetition_index
+  /axes/circular_point_index
+  /axes/circular_phase_rad
+  /axes/circular_x_um
+  /axes/circular_y_um
+  /axes/circular_z_um
+  /axes/scan_x_voltages
+  /axes/scan_y_voltages
+  /axes/scan_z_voltages
+
+Optional:
+  Add /views/flat_sample/primary, /views/flat_sample/extra, and
+  /views/flat_sample/analog as HDF5 virtual datasets for compatibility with
+  old code when circular data are stored as 8D.
+
+
+Part 2: BrightEyes-MCS-File reader and calibrator
+-------------------------------------------------
+
+Update BrightEyes-MCS-File to understand both old and new files:
+
+  /home/mdonato/myDev/BrightEyes-MCS-File/src/brighteyes_mcs_file/mcs.py
+  /home/mdonato/myDev/BrightEyes-MCS-File/src/brighteyes_mcs_file/h5_data_calibrator.py
+
+Reader requirements:
+
+  - metadata_load must read v0.1.2 files from /metadata.attrs and
+    /metadata/acquisition.
+  - load must accept canonical v0.1.2 data keys:
+      "primary" -> /data/primary
+      "extra" -> /data/extra
+      "analog" -> /data/analog
+    and still support old explicit keys:
+      "data"
+      "data_channels_extra"
+      "data_analog"
+  - Preserve compatibility with old v0.0.1 files.
+  - Expose correct DFD metadata from normalized fields first, and only fall
+    back to bitfile parsing for old files.
+
+calibrate_h5_file requirements:
+
+  - Accept old v0.0.1 files and new v0.1.2 raw files.
+  - Emit v0.1.2 calibrated output by default.
+  - Set:
+      file_kind = "calibrated_measurement"
+      contains_calibration = True
+      raw_data_preserved = True
+  - Preserve raw data values under /data.
+  - Add /calibration without overwriting /data.
+  - Keep raw metadata snapshots under /metadata/raw.
+  - Keep source file paths, source versions, and creation info under
+    /calibration/provenance.attrs.
+
+Calibration result paths:
+
+  /calibration/results/primary:
+    Results for /data/primary.
+
+  /calibration/results/extra:
+    Optional results for /data/extra, if the user asks to calibrate extra
+    channels and those channels are meaningful for FLIM calibration.
+
+  /calibration/results/analog:
+    Do not create by default. Analog data are not FLIM lifetime-calibrated
+    unless a specific analog correction is implemented.
+
+Calibration histogram reduction:
+
+  For non-circular 6D data, sum or aggregate over:
+
+    repetition, z, y, x
+
+  For circular 8D data, sum or aggregate over:
+
+    repetition, z, y, x, circular_repetition, circular_point
+
+  leaving:
+
+    (time_bin, channel)
+
+Store this in:
+
+  /calibration/inputs/<product>/data_histogram
+  /calibration/inputs/<product>/reference_histogram
+  /calibration/results/<product>/fit/measured_trace
+  /calibration/results/<product>/fit/reference_trace
+
+If circular-resolved calibration is intentionally added, store it under:
+
+  /calibration/results/<product>/by_circular_point
+
+and mark it optional.
+
+
+Part 3: migration and compatibility
+-----------------------------------
+
+Old input mapping:
+
+  top-level data -> /data/primary
+  top-level data_channels_extra -> /data/extra
+  top-level data_analog -> /data/analog
+  top-level thumbnail -> /data/thumbnail
+  configurationGUI -> /metadata/raw/configuration_gui
+  configurationGUI_beforeStart -> /metadata/raw/configuration_gui_before_start
+  configurationFPGA -> /metadata/raw/configuration_fpga
+  configurationSpadFCSmanager -> /metadata/raw/configuration_spad_fcs_manager
+
+Old 6D flat-sample data shape:
+
+  (nrep, nz, ny, nx, flat_sample, channel)
+
+Convert to v0.1.2 canonical 8D only when circular scanning is active and the
+split is safe:
+
+  (nrep, nz, ny, nx,
+   circular_repetition_count,
+   circular_point_count,
+   timebins_per_point,
+   channel)
+
+Convert to v0.1.2 canonical 6D when circular scanning is inactive:
+
+  (nrep, nz, ny, nx, timebins_per_point, channel)
+
+Only reshape when:
+
+  flat_sample ==
+    circular_repetition_count * circular_point_count * timebins_per_point
+
+If the reshape is ambiguous:
+
+  - preserve the data values;
+  - create metadata_warnings_json;
+  - keep a flat_sample compatibility view or expose a reader-level reshape
+    warning;
+  - do not silently invent circular dimensions;
+  - use 6D for non-circular data.
+
+
+Part 4: tests and verification
+------------------------------
+
+Add focused tests for:
+
+  1. BrightEyes-MCS raw normal raster digital-only output.
+  2. BrightEyes-MCS raw DFD raster digital-only output.
+  3. BrightEyes-MCS raw normal circular scan output.
+  4. BrightEyes-MCS raw output with data_analog active.
+  5. BrightEyes-MCS raw output with data_channels_extra active.
+  6. BrightEyes-MCS-File metadata_load on v0.1.2.
+  7. BrightEyes-MCS-File load on canonical keys primary, extra, analog.
+  8. calibrate_h5_file output from a v0.1.2 raw file.
+  9. calibrate_h5_file backward compatibility with an old v0.0.1 file.
+  10. DFD time bin formula:
+        laser_period_ns / digital_timebins_per_point
+  11. Normal time bin formula:
+        pixel_dwell_time_us /
+        (circular_samples_per_pixel * digital_timebins_per_point) * 1000.0
+  12. Non-circular acquisitions are stored as 6D.
+  13. Circular scan dimensions are explicit 8D axes and not flattened into
+      time_bin.
+  14. Analog-only raw acquisitions are valid.
+  15. Digital primary data always include extra digital data.
+
+Use small synthetic HDF5 files in tests so the tests are fast and deterministic.
+
+Verification commands to run when possible:
+
+  In BrightEyes-MCS:
+    run the existing test suite, or at least the tests touching H5Manager and
+    acquisition metadata.
+
+  In BrightEyes-MCS-File:
+    run the existing test suite, plus new tests for mcs.metadata_load,
+    mcs.load, and calibrate_h5_file.
+
+Also inspect one produced HDF5 file with h5py and print:
+
+  - root attrs;
+  - /metadata attrs;
+  - /data dataset shapes;
+  - /axes dataset shapes;
+  - /calibration attrs and result dataset shapes for calibrated output.
+
+
+Implementation constraints
+--------------------------
+
+Do not break old files:
+  Old v0.0.1 files must remain readable.
+
+Do not silently drop raw data:
+  Calibrated output must preserve the raw acquisition values.
+
+Do not encode mode in dataset names:
+  Use acquisition_mode and timing_reference metadata. Do not add data_dfd.
+
+Do not hide circular scanning:
+  circular_repetition and circular_point must be explicit axes only when
+  circular scanning is active. Use 6D for non-circular acquisitions.
+
+Do not assume analog data are FLIM-calibrated:
+  Preserve /data/analog and metadata. Add calibration only if a real analog
+  calibration method is implemented.
+
+Use JSON strings for structured attrs:
+  detector_grid_shape_json, channel label lists, warnings, and product maps
+  should be valid JSON strings.
+
+Use UTF-8 string datasets for string arrays:
+  Avoid object dtype arrays in new files.
+
+Handle metadata conflicts explicitly:
+  Preserve all raw values under /metadata/raw and write warnings to
+  metadata_warnings_json.
+
+
+Expected deliverables
+---------------------
+
+  - Updated BrightEyes-MCS raw HDF5 writer.
+  - Updated BrightEyes-MCS-File reader compatibility layer.
+  - Updated calibrate_h5_file v0.1.2 output writer.
+  - Tests for raw, DFD, circular, analog, extra digital, and calibrated files.
+  - A small schema inspection helper or notebook cell showing the new layout.
+  - A short migration note for old v0.0.1 files.

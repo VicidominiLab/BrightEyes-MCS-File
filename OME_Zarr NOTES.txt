@@ -1,0 +1,347 @@
+OME-Zarr exporter for calibrated BrightEyes MCS files
+=====================================================
+
+Short answer
+------------
+
+Yes, it makes sense to add a converter from calibrated HDF5 files to OME-Zarr,
+but I would keep it as a separate export step rather than mixing it directly
+into H5DataCalibrator.calibrate().
+
+The current calibration workflow already produces a rich HDF5 output:
+
+- original BrightEyes MCS datasets, typically shaped as
+  [repetition, z, y, x, t, ch]
+- calibration/results/<product>/ groups with per-channel fit results
+- stacked calibration histograms shaped as (t, ch)
+- channel_skew, delay_correction, tau_ns, IRF/reference traces, residual errors
+- copied acquisition metadata from configurationGUI and calibration attrs
+
+OME-Zarr is useful because it is easier to browse lazily, stream from object
+storage, open in modern bioimaging tooling, and separate image arrays from
+metadata cleanly. The main design question is not "can we convert?", but
+"which representation should be the first-class image?".
+
+Recommended first version
+-------------------------
+
+Implement a converter that exports calibrated HDF5 files into an OME-Zarr
+directory with one OME-Zarr image group per HDF5 data key.
+
+Start with the intensity image, not the full FLIM histogram cube:
+
+Input HDF5 dataset:
+
+    [repetition, z, y, x, t, ch]
+
+Primary OME-Zarr image:
+
+    [t, c, z, y, x]
+
+where:
+
+- OME-Zarr t = BrightEyes repetition
+- OME-Zarr c = detector/channel dimension, or optionally a derived channel set
+- OME-Zarr z/y/x = spatial dimensions
+- BrightEyes histogram bin t is reduced by summing over the microtime axis
+
+This gives a standard 5D image that most OME-Zarr readers understand:
+
+    intensity = h5[data_key].sum(axis=4)
+    intensity shape before transpose: [rep, z, y, x, ch]
+    intensity shape after transpose:  [rep, ch, z, y, x]
+
+The full histogram-resolved data can be added later because OME-Zarr image
+metadata supports up to 5 dimensions in the common image model. Keeping both
+repetition and microtime as image axes would make the raw data 6D:
+
+    [repetition, channel, z, y, x, microtime]
+
+That is scientifically valuable, but less portable as a normal OME-Zarr image.
+For v1, store histogram/microtime-derived products as auxiliary arrays or
+metadata, and focus the main image on viewer compatibility.
+
+Proposed Zarr layout
+--------------------
+
+For an output path such as sample_calib.ome.zarr:
+
+    sample_calib.ome.zarr/
+      zarr.json
+      OME/
+        zarr.json
+        METADATA.ome.xml               optional, later
+      data/
+        zarr.json                      OME multiscales image group
+        0/                             full-resolution intensity array
+        calibration/
+          zarr.json
+          channels/index
+          channels/reference_mask
+          timing/channel_skew_bins
+          timing/channel_skew_err_bins
+          timing/delay_correction_bins
+          timing/delay_correction_ns
+          timing/delay_correction_err_bins
+          timing/delay_correction_err_ns
+          fit/fitted_delay_bins
+          fit/fitted_delay_ns
+          fit/fitted_delay_err_bins
+          fit/fitted_delay_err_ns
+          fit/amplitude
+          fit/amplitude_err
+          fit/tau_ns
+          fit/tau_err_ns
+          fit/tau_reference_ns
+          fit/residual_error
+          fit/measured_trace
+          fit/irf_trace
+          fit/reference_trace                  only when reference_type == "ref"
+          fit/fitted_trace
+          aligned/irf_trace
+          aligned/reference_trace              only when reference_type == "ref"
+      data_channels_extra/
+        zarr.json
+        0/
+        calibration/
+          ...
+
+Notes:
+
+- Use one group per HDF5 data key rather than folding everything into a single
+  channel axis. This preserves the current calibrator's data_key abstraction.
+- The main image array should be OME-Zarr compliant and easy to open.
+- Calibration arrays should be stored nearby, but not advertised as primary
+  OME image multiscales unless they are image-like.
+- Per-channel scalar arrays are better kept as Zarr arrays plus JSON attrs.
+- The original HDF5 calibration attrs should be copied into namespaced attrs,
+  for example brighteyes_mcs_file.calibration.
+
+Axes and physical scaling
+-------------------------
+
+The primary image axes should be:
+
+    t, c, z, y, x
+
+Suggested axis metadata:
+
+- t: type "time", unit "second"; scale = metadata.frametime if available
+- c: type "channel"; no physical unit
+- z: type "space", unit "micrometer"; scale = metadata.dz
+- y: type "space", unit "micrometer"; scale = metadata.dy
+- x: type "space", unit "micrometer"; scale = metadata.dx
+
+The current mcs.MCSMetadata already exposes:
+
+- nx, ny, nz, nrep
+- range_x, range_y, range_z
+- dx, dy, dz
+- pxdwelltime, frametime, framerate
+- dfd_freq, dfd_nbins when recoverable from the bitfile name
+
+For calibration-specific time axes:
+
+- microtime bin width is already computed by H5DataCalibrator.build_time_axis()
+- store bin_width_in_ns, laser_period_in_ns, laser_freq_in_mhz as calibration
+  metadata
+- if exporting histogram arrays, document their axes explicitly as
+  microtime_bin, channel, or use a non-OME auxiliary layout until a robust
+  6D strategy is chosen
+
+API sketch
+----------
+
+Add a new module:
+
+    src/brighteyes_mcs_file/ome_zarr_exporter.py
+
+Public functions/classes:
+
+    class OMEZarrExporter:
+        def __init__(
+            self,
+            input_path,
+            output_path=None,
+            data_key=("data", "data_channels_extra"),
+            calibration_key="calibration",
+            overwrite=False,
+            image_mode="intensity",
+            chunks=None,
+            compressor=None,
+            multiscale=False,
+        ):
+            ...
+
+        def export(self):
+            ...
+
+    def convert_calibrated_h5_to_ome_zarr(...):
+        return OMEZarrExporter(...).export()
+
+Export this from __init__.py:
+
+    from .ome_zarr_exporter import OMEZarrExporter, convert_calibrated_h5_to_ome_zarr
+
+Default output path:
+
+    sample_calib.h5 -> sample_calib.ome.zarr
+
+Important behavior:
+
+- refuse to overwrite unless overwrite=True
+- validate that calibration/results/<product>/ exists when exporting calibration
+  metadata
+- stream data chunk-by-chunk from HDF5 instead of materializing the full 6D
+  dataset
+- support data_key as string, iterable, or None using the same normalization
+  pattern as H5DataCalibrator
+- copy enough source metadata to make the Zarr self-describing
+
+Dependency strategy
+-------------------
+
+Keep OME-Zarr support optional:
+
+    [project.optional-dependencies]
+    ome-zarr = [
+        "zarr",
+        "ome-zarr",
+        "dask",
+    ]
+
+Why optional:
+
+- the core package is currently lightweight
+- not every user needs Zarr export
+- ome-zarr/zarr dependency versions can move faster than the calibration code
+
+Implementation options:
+
+- Use ome-zarr-py writer helpers when possible for OME metadata.
+- Use zarr directly for auxiliary calibration arrays.
+- Use dask.array.from_array(h5_dataset, chunks=...) to stream conversion.
+- For v1, write a single resolution level. Add multiscales later.
+
+Chunking proposal
+-----------------
+
+Default chunking should optimize common browsing patterns:
+
+    [1, 1, min(16, z), min(256, y), min(256, x)]
+
+For very small z stacks:
+
+    [1, 1, 1, min(256, y), min(256, x)]
+
+For 2D-like data where z == 1, this keeps channel/time browsing responsive.
+
+The intensity conversion can be streamed by blocks:
+
+1. read HDF5 block [rep, z, y, x, microtime, ch]
+2. sum over microtime
+3. transpose to [rep, ch, z, y, x]
+4. write to Zarr chunk
+
+This avoids loading the whole dataset.
+
+What to do with calibrated correction values
+--------------------------------------------
+
+The current calibration output mostly contains parameters and traces, not a
+fully corrected image cube. Therefore the exporter should not claim the primary
+image is "corrected" unless it actually applies the calibration.
+
+Use clear naming:
+
+- image_mode="intensity": raw intensity projection from the calibrated HDF5
+  file's image datasets
+- image_mode="skew_corrected_intensity": future mode that applies channel_skew
+  before summing channels or writing a derived channel
+- image_mode="phasor" or "lifetime": future derived maps, if implemented from
+  histograms and calibration parameters
+
+For v1, the safest statement is:
+
+    "OME-Zarr export of the calibrated HDF5 container, preserving calibration
+    metadata and exporting a viewer-compatible intensity image."
+
+Do not imply:
+
+    "OME-Zarr image data are fully calibrated/corrected"
+
+unless we explicitly apply delay_correction/channel_skew/IRF corrections.
+
+Milestone plan
+--------------
+
+Milestone 1: minimal exporter
+
+- add optional dependencies
+- add OMEZarrExporter and convert_calibrated_h5_to_ome_zarr()
+- export intensity arrays for one or more data keys
+- copy calibration scalar/vector arrays
+- copy key metadata and OME axis scale metadata
+- add simple tests with a tiny synthetic HDF5 file
+
+Milestone 2: better metadata and validation
+
+- validate with ome-zarr-py reader
+- add a show/export summary function
+- include channel labels and display metadata
+- preserve original source file paths and package version
+- test missing calibration group and uncalibrated HDF5 behavior
+
+Milestone 3: derived calibrated products
+
+- generate channel-skew-corrected summed image
+- generate per-pixel lifetime/phasor maps if analysis functions support it
+- add labels or auxiliary groups for masks/ROIs if needed
+- add multiscale pyramids for large spatial images
+
+Risks and open questions
+------------------------
+
+The main risk is dimensionality. BrightEyes FLIM data are naturally 6D when
+both repetition and microtime are retained, while standard OME-Zarr image
+arrays are commonly constrained to 2D-5D with time, channel, and spatial axes.
+For compatibility, the first exporter should reduce microtime into intensity
+and keep histogram data as auxiliary calibration arrays.
+
+Another risk is naming: a file produced by calibrate_h5_file() contains
+calibration metadata, but the original image dataset remains original unless a
+later step applies corrections. The exporter should be explicit about this.
+
+Open questions before implementation:
+
+- Should the primary exported image be per-detector-channel intensity, or a
+  channel-summed image?
+- Should data and data_channels_extra become separate OME image groups, or
+  should they be merged into one channel axis?
+- Do we want OME-Zarr v0.5/Zarr v3 immediately, or prefer the more widely
+  deployed ome-zarr-py stable defaults first?
+- Which downstream viewer is the priority: napari, webknossos, vizarr,
+  MoBIE, or custom analysis scripts?
+
+My recommendation
+-----------------
+
+Add the converter, but keep the first version conservative:
+
+- export viewer-compatible intensity OME-Zarr
+- preserve all calibration outputs as auxiliary Zarr arrays
+- avoid claiming the image data are corrected unless corrections are applied
+- make ome-zarr an optional extra
+- design the API so future derived products can be added without changing the
+  basic export contract
+
+This would make the package more useful for sharing and browsing calibrated
+datasets while keeping the calibration pipeline stable.
+
+References checked
+------------------
+
+- OME-Zarr specification 0.5, published as the latest version on 2026-05-06:
+  https://ngff.openmicroscopy.org/0.5/
+- ome-zarr-py writer API:
+  https://ome-zarr.readthedocs.io/en/stable/api/writer.html

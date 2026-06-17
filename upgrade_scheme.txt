@@ -1,0 +1,678 @@
+BrightEyes-MCS calibrated HDF5 upgrade scheme proposal
+======================================================
+
+Status
+------
+
+Draft proposal only. This file describes the target output structure to review
+before changing h5_data_calibrator.py.
+
+Scheme version:
+  0.0.5
+
+Main requested change
+---------------------
+
+The current calibrator copies the input HDF5 file and appends /calibration and
+optionally /output. The upgraded writer should instead create a new HDF5 file
+from scratch with three required root groups and one optional root preview
+dataset:
+
+  /raw
+  /calibration
+  /output
+  /thumbnail       optional dataset
+
+The measured input payload is stored directly under /raw:
+
+  /raw/spad
+    old input /data
+
+  /raw/aux
+    old input /data_channels_extra
+
+Optional payloads, normalized metadata, axes, and legacy configuration are also
+stored below /raw. This breaks root-level compatibility intentionally; old
+configuration* groups are preserved under /raw/legacy.
+
+
+Top-level layout
+----------------
+
+Proposed tree:
+
+/
+  attrs:
+    data_format_version = "0.0.5"
+    schema_name = "brighteyes_mcs_file"
+    schema_variant = "raw_root_group_root_thumbnail"
+    file_kind = "calibrated_measurement"
+    default = "/raw/spad"
+    data_path = "/raw"
+    metadata_path = "/raw/metadata"
+    axes_path = "/raw/axes"
+    legacy_path = "/raw/legacy"
+    calibration_path = "/calibration"
+    output_path = "/output"
+    contains_measured_payload = True
+    contains_legacy_configuration = True
+    contains_calibration = True | False
+    contains_output = True | False
+    compatibility_root_configuration_groups = False
+    comment = "<source root comment or user supplied comment>"
+
+  raw/
+    # Original measured payload, normalized metadata, axes, and legacy source
+    # configuration. This is the only root raw payload container.
+
+  calibration/
+    # Calibration settings, provenance, histograms, fit results, delays, and
+    # channel-skew results.
+
+  output/
+    # Optional derived analysis outputs such as channel-summed images.
+
+  thumbnail
+    # Optional preview dataset copied from old /thumbnail.
+
+Root rule:
+  No /metadata, /axes, /legacy, /original_data, /configurationGUI,
+  /configurationFPGA, /configurationGUI_beforeStart, or
+  /configurationSpadFCSmanager groups are written at the root.
+
+
+/raw
+-----
+
+Purpose:
+  Store the input measured payload in canonical names and provide all metadata
+  needed to interpret it. /raw is both the payload container and the place
+  where old configuration is preserved.
+
+/raw.attrs:
+  description = "Measured BrightEyes-MCS payload with normalized metadata, axes, and legacy configuration."
+  source_file = "<input HDF5 path>"
+  source_data_format_version = "<input /.attrs.data_format_version or unknown>"
+  source_root_default = "<input /.attrs.default, usually data>"
+  source_payload_paths_json = "[\"/data\", \"/data_channels_extra\", ...]"
+  values_preserved = True
+  shape_preserved = True
+  dtype_preserved = True
+  spad = "/raw/spad"
+  aux = "/raw/aux"
+  analog = "/raw/analog"
+  thumbnail = "/thumbnail"
+  metadata_path = "/raw/metadata"
+  axes_path = "/raw/axes"
+  legacy_path = "/raw/legacy"
+  source_axis_order = "repetition,z,y,x,time_bin,channel"
+  note = "Dataset attrs are added for readability; numeric payload values are unchanged."
+
+Recommended children:
+
+  /raw/spad
+  /raw/aux
+  /raw/analog                 optional
+  /raw/metadata
+  /raw/axes
+  /raw/legacy
+
+
+/raw/spad
+-------------
+
+Source path:
+  old input /data
+
+Meaning:
+  Primary digital FIFO photon-count histograms.
+
+Shape:
+  (R, Z, Y, X, Td, C) for current BrightEyes-MCS files.
+
+Dtype:
+  uint16 in normal observed files.
+
+Required attrs:
+  data_role = "spad_detector_counts"
+  long_name = "SPAD digital detector photon counts"
+  description = "Photon counts decoded from the BrightEyes-MCS digital FIFO."
+  source_input_path = "/data"
+  source_fifo = "FIFO"
+  source_key = "data"
+  units = "counts"
+  axis_order = "repetition,z,y,x,time_bin,detector_channel"
+  axis_0 = "repetition"
+  axis_1 = "z"
+  axis_2 = "y"
+  axis_3 = "x"
+  axis_4 = "time_bin"
+  axis_5 = "detector_channel"
+  time_axis_index = 4
+  channel_axis_index = 5
+  time_axis_path = "/raw/axes/digital_time_ns"
+  channel_axis_path = "/raw/axes/detector_channel_index"
+  metadata_path = "/raw/metadata"
+  legacy_metadata_path = "/raw/legacy"
+  calibration_result_path = "/calibration/results/spad"
+  expected_shape_source = "configurationFPGA/configurationSpadFCSmanager plus dataset shape"
+  shape_json = "[R, Z, Y, X, Td, C]"
+  dtype_preserved_from_source = True
+
+
+/raw/aux
+-----------
+
+Source path:
+  old input /data_channels_extra
+
+Meaning:
+  Two auxiliary digital FIFO channels decoded together with the SPAD
+  detector channels.
+
+Shape:
+  (R, Z, Y, X, Td, 2) for current BrightEyes-MCS files.
+
+Dtype:
+  uint8 in normal observed files.
+
+Required attrs:
+  data_role = "auxiliary_digital_counts"
+  long_name = "auxiliary digital FIFO counts"
+  description = "Auxiliary digital channels decoded from the BrightEyes-MCS digital FIFO."
+  source_input_path = "/data_channels_extra"
+  source_fifo = "FIFO"
+  source_key = "data_channels_extra"
+  units = "counts"
+  axis_order = "repetition,z,y,x,time_bin,aux_channel"
+  axis_0 = "repetition"
+  axis_1 = "z"
+  axis_2 = "y"
+  axis_3 = "x"
+  axis_4 = "time_bin"
+  axis_5 = "aux_channel"
+  time_axis_index = 4
+  channel_axis_index = 5
+  time_axis_path = "/raw/axes/digital_time_ns"
+  channel_axis_path = "/raw/axes/aux_channel_index"
+  metadata_path = "/raw/metadata"
+  legacy_metadata_path = "/raw/legacy"
+  calibration_result_path = "/calibration/results/aux"
+
+
+/raw/analog
+------------
+
+Optional source path:
+  old input /data_analog
+
+Meaning:
+  Analog FIFO channels, if analog acquisition was active.
+
+Shape:
+  (R, Z, Y, X, Ta, 2) for current BrightEyes-MCS files.
+
+Required attrs:
+  data_role = "analog_fifo"
+  long_name = "analog FIFO samples"
+  description = "Analog FIFO samples copied from the BrightEyes-MCS input file."
+  source_input_path = "/data_analog"
+  source_fifo = "FIFOAnalog"
+  source_key = "data_analog"
+  units = "adc_counts"
+  axis_order = "repetition,z,y,x,time_bin,analog_channel"
+  time_axis_index = 4
+  channel_axis_index = 5
+  time_axis_path = "/raw/axes/analog_time_ns"
+  channel_axis_path = "/raw/axes/analog_channel_index"
+  metadata_path = "/raw/metadata"
+  legacy_metadata_path = "/raw/legacy"
+  calibration_result_path = ""
+
+
+/thumbnail
+----------
+
+Optional source path:
+  old input /thumbnail
+
+Required attrs:
+  data_role = "preview_thumbnail"
+  long_name = "preview thumbnail"
+  description = "Preview JPEG bytes copied from the BrightEyes-MCS input file."
+  source_input_path = "/thumbnail"
+  units = "encoded_bytes"
+
+
+/raw/metadata
+--------------
+
+Purpose:
+  Store normalized metadata using stable names. Readers should use this group
+  instead of parsing raw GUI/FPGA attribute names. Raw original names remain
+  available under /raw/legacy.
+
+/raw/metadata.attrs:
+  description = "Normalized acquisition metadata derived from BrightEyes-MCS legacy configuration."
+  source_file = "<input HDF5 path>"
+  source_data_format_version = "<input version or unknown>"
+  source_comment = "<input root comment>"
+  legacy_path = "/raw/legacy"
+  data_spad_path = "/raw/spad"
+  data_aux_path = "/raw/aux or empty string"
+  data_analog_path = "/raw/analog or empty string"
+  acquisition_mode = "normal" | "dfd"
+  dfd_active = True | False
+  timing_reference = "pixel_dwell" | "laser_period"
+  nrep = <int>
+  nz = <int>
+  ny = <int>
+  nx = <int>
+  digital_timebins = <int>
+  analog_timebins = <int or 0>
+  spad_channel_count = <int>
+  aux_channel_count = <int or 0>
+  analog_channel_count = <int or 0>
+  range_x_um = <float or NaN>
+  range_y_um = <float or NaN>
+  range_z_um = <float or NaN>
+  pixel_size_x_um = <float or NaN>
+  pixel_size_y_um = <float or NaN>
+  pixel_size_z_um = <float or NaN>
+  time_resolution_us = <float or NaN>
+  pixel_dwell_time_us = <float or NaN>
+  pixel_dwell_time_ns = <float or NaN>
+  laser_frequency_mhz = <float or NaN>
+  laser_period_ns = <float or NaN>
+  digital_timebin_ns = <float or NaN>
+  analog_timebin_ns = <float or NaN>
+  frame_time_s = <float or NaN>
+  volume_time_s = <float or NaN>
+  acquisition_duration_s = <float or NaN>
+  snake_walk_xy = True | False
+  snake_walk_z = True | False
+  subpixel_scan_mode = "none" | "circular"
+  circular_point_count = <int, default 1>
+  circular_repetition_count = <int, default 1>
+  metadata_warnings_json = "[]"
+
+Recommended normalized subgroups:
+
+/raw/metadata/acquisition/scan.attrs:
+  spatial_scan_mode = "raster"
+  subpixel_scan_mode = "none" | "circular"
+  nx = <int>
+  ny = <int>
+  nz = <int>
+  nrep = <int>
+  range_x_um = <float or NaN>
+  range_y_um = <float or NaN>
+  range_z_um = <float or NaN>
+  offset_x_um = <float or NaN>
+  offset_y_um = <float or NaN>
+  offset_z_um = <float or NaN>
+  pixel_size_x_um = <float or NaN>
+  pixel_size_y_um = <float or NaN>
+  pixel_size_z_um = <float or NaN>
+  snake_walk_xy = True | False
+  snake_walk_z = True | False
+  circular_active = True | False
+  circular_point_count = <int>
+  circular_repetition_count = <int>
+
+/raw/metadata/acquisition/timing.attrs:
+  acquisition_mode = "normal" | "dfd"
+  timing_reference = "pixel_dwell" | "laser_period"
+  time_resolution_us = <float or NaN>
+  base_timebins_per_pixel = <int or NaN>
+  digital_timebins = <int>
+  analog_timebins = <int or 0>
+  digital_timebin_ns = <float or NaN>
+  analog_timebin_ns = <float or NaN>
+  pixel_dwell_time_us = <float or NaN>
+  laser_frequency_mhz = <float or NaN>
+  laser_period_ns = <float or NaN>
+  dfd_active = True | False
+  dfd_nbins = <int or NaN>
+  dfd_trigger_selector = <int or NaN>
+  dfd_laser_sync_debug = True | False
+
+/raw/metadata/acquisition/fifo.attrs:
+  digital_fifo_active = True | False
+  analog_fifo_active = True | False
+  spad_source_path = "/raw/spad"
+  aux_source_path = "/raw/aux or empty string"
+  analog_source_path = "/raw/analog or empty string"
+  spad_dtype = "<dtype>"
+  aux_dtype = "<dtype or empty string>"
+  analog_dtype = "<dtype or empty string>"
+  spad_shape_json = "[...]"
+  aux_shape_json = "[...]"
+  analog_shape_json = "[...]"
+
+/raw/metadata/acquisition/channels.attrs:
+  spad_channel_count = <int>
+  aux_channel_count = <int or 0>
+  analog_channel_count = <int or 0>
+  detector_channel_axis_path = "/raw/axes/detector_channel_index"
+  aux_channel_axis_path = "/raw/axes/aux_channel_index"
+  analog_channel_axis_path = "/raw/axes/analog_channel_index"
+  detector_channel_labels_json = "[]"
+  aux_channel_labels_json = "[]"
+  analog_channel_labels_json = "[\"analog_0\", \"analog_1\"]"
+
+
+/raw/axes
+----------
+
+Purpose:
+  Make dimensional meaning explicit. Datasets should point to these paths using
+  attrs such as time_axis_path and channel_axis_path.
+
+/raw/axes.attrs:
+  description = "Physical and logical axes for measured payload and derived products."
+
+Required or recommended datasets:
+
+/raw/axes/repetition_index
+  shape = (nrep,)
+  dtype = int64
+  attrs:
+    axis = "repetition"
+    units = "index"
+    long_name = "repetition index"
+
+/raw/axes/z_um
+  shape = (nz,)
+  dtype = float64
+  attrs:
+    axis = "z"
+    units = "um"
+    long_name = "z position"
+
+/raw/axes/y_um
+  shape = (ny,)
+  dtype = float64
+  attrs:
+    axis = "y"
+    units = "um"
+    long_name = "y position"
+
+/raw/axes/x_um
+  shape = (nx,)
+  dtype = float64
+  attrs:
+    axis = "x"
+    units = "um"
+    long_name = "x position"
+
+/raw/axes/digital_time_ns
+  shape = (digital_timebins,)
+  dtype = float64
+  attrs:
+    axis = "time_bin"
+    units = "ns"
+    long_name = "digital FIFO time axis"
+    acquisition_mode = "/raw/metadata.attrs.acquisition_mode"
+    timing_reference = "/raw/metadata.attrs.timing_reference"
+    bin_width_ns = "/raw/metadata.attrs.digital_timebin_ns"
+
+/raw/axes/analog_time_ns
+  Optional. Write when /raw/analog exists.
+  shape = (analog_timebins,)
+  dtype = float64
+  attrs:
+    axis = "time_bin"
+    units = "ns"
+    long_name = "analog FIFO time axis"
+    bin_width_ns = "/raw/metadata.attrs.analog_timebin_ns"
+
+/raw/axes/detector_channel_index
+  shape = (spad_channel_count,)
+  dtype = int64
+  attrs:
+    axis = "detector_channel"
+    units = "index"
+    long_name = "detector channel index"
+
+/raw/axes/aux_channel_index
+  Optional. Write when /raw/aux exists.
+  shape = (aux_channel_count,)
+  dtype = int64
+  attrs:
+    axis = "aux_channel"
+    units = "index"
+    long_name = "auxiliary digital channel index"
+
+/raw/axes/analog_channel_index
+  Optional. Write when /raw/analog exists.
+  shape = (analog_channel_count,)
+  dtype = int64
+  attrs:
+    axis = "analog_channel"
+    units = "index"
+    long_name = "analog channel index"
+
+
+/raw/legacy
+------------
+
+Purpose:
+  Preserve the old configuration scheme inside /raw. These groups are for
+  traceability, not for normal analysis.
+
+/raw/legacy.attrs:
+  description = "Verbatim legacy BrightEyes-MCS root attributes and configuration groups."
+  source_file = "<input HDF5 path>"
+  source_group_paths_json = "[\"/configurationGUI\", \"/configurationFPGA\", ...]"
+  use_for_analysis = "Prefer /raw/metadata for normalized analysis metadata."
+
+Groups copied from the input file:
+
+/raw/legacy/root_attrs.attrs:
+  <all input root attrs>
+
+/raw/legacy/configurationGUI.attrs:
+  <all attrs copied from input /configurationGUI>
+
+/raw/legacy/configurationGUI_beforeStart.attrs:
+  <all attrs copied from input /configurationGUI_beforeStart, if present>
+
+/raw/legacy/configurationFPGA.attrs:
+  <all attrs copied from input /configurationFPGA>
+
+/raw/legacy/configurationSpadFCSmanager.attrs:
+  <all attrs copied from input /configurationSpadFCSmanager, if present>
+
+/raw/legacy/rawStreamAcquisition.attrs:
+  <all attrs copied from input /rawStreamAcquisition, if present>
+
+Legacy preservation rule:
+  Do not normalize names inside /raw/legacy copied groups. Keep original attr
+  names and values there. Put normalized names only under /raw/metadata.
+
+
+/calibration
+------------
+
+Purpose:
+  Keep the existing calibration content model, but point all source paths to
+  the restructured /raw paths.
+
+/calibration.attrs:
+  metadata_path = "/raw/metadata"
+  axes_path = "/raw/axes"
+  data_path = "/raw"
+  legacy_path = "/raw/legacy"
+  results_path = "/calibration/results"
+  calibrated_products_json = "[\"spad\", \"aux\"]"
+  reference_type = "ref" | "irf"
+  fit_mode = "<current fit mode>"
+  fit_type = "<current fit type>"
+  residual_error_metric = "rmse_normalized_histograms"
+  channel_skew_type = "<current channel skew type>"
+  channel_skew_source = "<current channel skew source>"
+
+/calibration/provenance.attrs:
+  created_by_package = "brighteyes_mcs_file"
+  created_by_version = "<package version>"
+  created_at_iso8601 = "<timestamp>"
+  source_data_file = "<input measurement file>"
+  source_reference_file = "<reference file>"
+  output_file = "<new output file>"
+  payload_group = "/raw"
+  normalized_metadata_path = "/raw/metadata"
+  legacy_configuration_path = "/raw/legacy"
+  raw_data_values_preserved = True
+
+/calibration/provenance/input_data_metadata
+  Optional provenance snapshot. If retained, this should either mirror
+  /raw/metadata attrs or explicitly say it is historical input metadata.
+
+/calibration/results/spad.attrs:
+  product_name = "spad"
+  source_data_path = "/raw/spad"
+  source_input_path = "/data"
+  source_data_key = "data"
+  source_fifo = "FIFO"
+  source_axes = "repetition,z,y,x,time_bin,detector_channel"
+  source_reduction_axes = "repetition,z,y,x"
+  histogram_axes = "time_bin,detector_channel"
+  time_axis_path = "/raw/axes/digital_time_ns"
+  metadata_path = "/raw/metadata"
+  legacy_path = "/raw/legacy"
+
+/calibration/results/aux.attrs:
+  product_name = "aux"
+  source_data_path = "/raw/aux"
+  source_input_path = "/data_channels_extra"
+  source_data_key = "data_channels_extra"
+  source_fifo = "FIFO"
+  source_axes = "repetition,z,y,x,time_bin,aux_channel"
+  source_reduction_axes = "repetition,z,y,x"
+  histogram_axes = "time_bin,aux_channel"
+  time_axis_path = "/raw/axes/digital_time_ns"
+  metadata_path = "/raw/metadata"
+  legacy_path = "/raw/legacy"
+
+Calibration result datasets:
+  Keep the existing result substructure unless there is a separate reason to
+  rename it:
+
+    /calibration/results/<product>/channels/index
+    /calibration/results/<product>/channels/reference_mask
+    /calibration/results/<product>/delay/*
+    /calibration/results/<product>/fit/*
+    /calibration/results/<product>/aligned/*
+
+Dataset attrs should consistently include:
+  units = "ns" | "bins" | "counts" | "dimensionless"
+  axes = "<axis list>"
+  long_name = "<human-readable name>"
+  description = "<short explanation>"
+  source_data_path = "/raw/<product>"
+  metadata_path = "/raw/metadata"
+
+
+/output
+-------
+
+Purpose:
+  Keep derived products separate from measured payload and calibration. The
+  current /output/<run_id> structure is acceptable, but source pointers should
+  use the upgraded /raw paths.
+
+/output.attrs:
+  description = "Derived analysis outputs. Measured payload is stored under /raw."
+  source_data_path = "/raw/spad"
+  source_aux_data_path = "/raw/aux or empty string"
+  metadata_path = "/raw/metadata"
+  axes_path = "/raw/axes"
+  legacy_path = "/raw/legacy"
+
+Each /output/<run_id>.attrs should include:
+  source_data_path = "/raw/spad"
+  source_aux_data_path = "/raw/aux or empty string"
+  source_calibration_path = "/calibration/results/spad"
+  source_aux_calibration_path = "/calibration/results/aux or empty string"
+  source_metadata_path = "/raw/metadata"
+  source_axes_path = "/raw/axes"
+  source_legacy_path = "/raw/legacy"
+  input_axis_order = "repetition,z,y,x,time_bin,detector_channel"
+  output_axis_order = "<output axes>"
+  time_axis_path = "/output/<run_id>/axes/time_ns"
+
+
+Implementation rules for h5_data_calibrator.py
+----------------------------------------------
+
+1. Replace the copy-then-append behavior for the upgraded mode.
+   The writer should create a new empty HDF5 output file and explicitly write
+   only /raw, /calibration, and /output at the root.
+
+2. Preserve user data and avoid accidental data mutation.
+   Numeric values under /raw/spad, /raw/aux, and optional /raw/analog
+   must match the corresponding input datasets exactly. Copy dtype, shape, and
+   preferably chunks/compression when practical.
+
+3. Break old root-level compatibility intentionally.
+   Do not write old configuration groups at the root. Preserve them under
+   /raw/legacy.
+
+4. Add descriptive attrs to payload datasets.
+   The current input files usually have no attrs on /data and
+   /data_channels_extra. The upgraded file should add axis, units, source path,
+   metadata path, and calibration path attrs.
+
+5. Keep legacy configuration exact.
+   Copy old configuration attrs into /raw/legacy without renaming them.
+   Normalized names belong under /raw/metadata.
+
+6. Use JSON strings for structured attrs.
+   Attribute names storing JSON should end with _json.
+
+7. Calibration and output should reference canonical paths.
+   New calibration/output source attrs should point to /raw/spad and
+   /raw/aux.
+
+8. Missing optional source objects should be explicit.
+   If /data_channels_extra, /data_analog, /thumbnail, or
+   /rawStreamAcquisition are absent, omit their datasets/groups and set the
+   corresponding metadata paths to an empty string.
+
+9. Record conflicts instead of guessing silently.
+   If metadata-derived dimensions disagree with dataset shapes, use dataset
+   shape as authoritative for payload dimensions and append a warning to
+   /raw/metadata.attrs.metadata_warnings_json.
+
+
+Minimal conversion order
+------------------------
+
+1. Open source data file read-only.
+2. Open output file as a new file.
+3. Write root attrs.
+4. Create /raw, /calibration, and /output as the required root groups.
+5. Copy old /data to /raw/spad and old /data_channels_extra to /raw/aux.
+6. Copy optional old /data_analog to /raw/analog and /thumbnail to /thumbnail.
+7. Copy root attrs and legacy configuration groups to /raw/legacy.
+8. Build /raw/metadata normalized attrs and acquisition subgroups.
+9. Build /raw/axes datasets.
+10. Run calibration using /raw/spad and /raw/aux as source datasets.
+11. Build optional /output products using /raw and /raw/metadata paths.
+
+
+Open questions before implementation
+------------------------------------
+
+1. Should /output always be created, even when create_output=False, so the root
+   always has exactly /raw, /calibration, /output?
+
+2. Should /calibration always be created for uncalibrated conversions, or only
+   when calibration is actually performed?
+
+3. Should the canonical /raw paths keep the current 6D layout, or should a
+   future version split circular scan dimensions into explicit axes?
+
+4. Should /calibration/provenance/input_data_metadata remain as a compatibility
+   snapshot, or should calibration provenance point only to /raw/metadata?
