@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "brighteyes-mcs-file"
-version = "0.2.1"
+version = "0.2.2"
 description = "Utilities for reading and calibrating BrightEyes MCS HDF5 files."
 readme = "README.md"
 requires-python = ">=3.9"

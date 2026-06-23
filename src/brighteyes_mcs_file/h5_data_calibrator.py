@@ -2856,7 +2856,7 @@ class H5OutputBuilder:
         include_aux_shifted_sum=None,
         include_extra_shifted_sum=True,
         require_shifted_sum=False,
-        shifted_sum_backend="gpu",
+        shifted_sum_backend="auto",
         shifted_sum_chunk_size=None,
         shifted_sum_reverse_shifts=True,
         shifted_sum_show_progress=False,
