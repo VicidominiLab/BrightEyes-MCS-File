@@ -1,4 +1,4 @@
-# BrightEyes-MCS-File and BrightEyes-FLIM: Conceptual Overview
+# BrightEyes-MCS-File and BrightEyes-FLISM: Conceptual Overview
 
 This note explains the role of the two projects, how they connect, the fitting
 model used for calibration and lifetime extraction, and the typical workflow
@@ -7,7 +7,7 @@ mentioned only where they clarify the workflow.
 
 ## 1. Big Picture
 
-BrightEyes-MCS-File and BrightEyes-FLIM are two layers of the same FLIM data
+BrightEyes-MCS-File and BrightEyes-FLISM are two layers of the same FLIM data
 analysis problem.
 
 BrightEyes-MCS-File is the HDF5 and calibration layer. It knows how to read
@@ -15,7 +15,7 @@ BrightEyes MCS files, interpret the multi-dimensional photon histograms, compare
 the data with a reference acquisition, estimate channel timing corrections, and
 write the calibration products back into an HDF5 file.
 
-BrightEyes-FLIM is the FLIM analysis and visualization layer. It provides phasor
+BrightEyes-FLISM is the FLIM analysis and visualization layer. It provides phasor
 analysis, lifetime map plotting, histogram summaries, equalized color mapping,
 and legacy convenience containers. In the current code it also reuses and
 re-exports many routines from BrightEyes-MCS-File, especially the calibration,
@@ -47,14 +47,14 @@ Calibrated HDF5 file
     - fit traces useful for quality control
     |
     v
-BrightEyes-FLIM
+BrightEyes-FLISM
     - aligns and sums detector channels
     - computes phasors or per-pixel lifetime fits
     - produces lifetime maps, histograms, and summaries
 ```
 
 The two projects therefore do not represent two unrelated analyses. The MCS-file
-project prepares physically meaningful, calibrated time histograms; the FLIM
+project prepares physically meaningful, calibrated time histograms; the FLISM
 project turns those calibrated histograms into interpretable lifetime images.
 
 ## 2. Data Model
@@ -429,9 +429,9 @@ quality-control notebook. Its goal is to answer:
 - Does the fitted trace reproduce the measured decay?
 - Did the calibrated HDF5 file receive the expected calibration datasets?
 
-## 9. Typical FLIM Application Workflow
+## 9. Typical FLISM Application Workflow
 
-The FLIM fit notebooks start from a calibrated HDF5 file. The practical
+The FLISM fit notebooks start from a calibrated HDF5 file. The practical
 application is to transform raw multi-channel detector data into a lifetime map
 of the sample.
 
@@ -483,9 +483,9 @@ intensity alone. Two regions may have similar brightness but different decay
 times because the fluorophore environment, binding state, FRET state, pH,
 viscosity, or molecular composition differs.
 
-## 10. Phasor Analysis In BrightEyes-FLIM
+## 10. Phasor Analysis In BrightEyes-FLISM
 
-BrightEyes-FLIM also supports phasor analysis. A phasor is the Fourier
+BrightEyes-FLISM also supports phasor analysis. A phasor is the Fourier
 representation of the decay histogram at a selected harmonic.
 
 Conceptually:
@@ -561,7 +561,7 @@ How do I turn raw multi-channel BrightEyes HDF5 data into calibrated, aligned,
 physically meaningful time histograms?
 ```
 
-BrightEyes-FLIM answers:
+BrightEyes-FLISM answers:
 
 ```text
 How do I turn calibrated FLIM histograms into lifetime/phasor maps and useful
@@ -570,5 +570,5 @@ visual summaries?
 
 The fit is the bridge between the two. It separates sample lifetime from
 instrument response and timing delay. The calibration notebook uses this bridge
-to create a calibrated HDF5 file; the FLIM notebooks then use that file to make
+to create a calibrated HDF5 file; the FLISM notebooks then use that file to make
 per-pixel lifetime maps and phasor/lifetime visualizations.
