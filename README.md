@@ -39,7 +39,7 @@ metadata = metadata_load("data.h5")
 output_path = calibrate_h5_file("data.h5", "reference.h5", create_output=True)
 show_h5_structure_html(output_path)
 ```
-
+ 
 Set `create_output=False` to write only the calibration results without the
 derived `/output` analysis group.
 
