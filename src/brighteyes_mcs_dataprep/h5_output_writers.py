@@ -33,6 +33,7 @@ BRIGHTEYES_H5_OUTPUT_PATH = "/output"
 
 OUTPUT_DEFAULT_ATTRS = {
     "default": "",
+    "default_run": "",
     "default_irf_trace_id": "",
     "default_ref_trace_id": "",
 }
@@ -73,7 +74,7 @@ def _package_version():
     if version is None:
         return "unknown"
     try:
-        return version("brighteyes_mcs_file")
+        return version("brighteyes-mcs-dataprep")
     except PackageNotFoundError:
         return "unknown"
 
@@ -291,6 +292,24 @@ def _write_dataset_collection(group, collection, common_attrs=None):
         _write_dataset(group, product, attrs=common_attrs)
 
 
+def _select_default_product(products, default_product):
+    """Return the product selected by ``default_product`` or the first product."""
+
+    if default_product is None:
+        return products[0]
+    default_product = str(default_product).strip("/")
+    if "/products/" in default_product:
+        default_product = default_product.rsplit("/products/", 1)[1].strip("/")
+    for product in products:
+        if product.name == default_product:
+            return product
+    available = ", ".join(product.name for product in products)
+    raise ValueError(
+        f"default_product must match one product name; got {default_product!r}. "
+        f"Available products: {available}"
+    )
+
+
 def _prepare_target_file(source_path, output_path, mode):
     """Return the HDF5 file path to open for the requested write mode."""
 
@@ -366,6 +385,7 @@ def write_h5_output_run(
     attrs=None,
     intermediates=None,
     set_default=False,
+    default_product=None,
 ):
     """Write one current-schema BrightEyes analysis run under ``/output``.
 
@@ -389,6 +409,12 @@ def write_h5_output_run(
         Optional dataset collections written under ``axes`` and
         ``intermediates``. They accept the same product objects as
         ``products``.
+    set_default:
+        If true, set ``/output.attrs["default"]`` to a product dataset path and
+        ``/output.attrs["default_run"]`` to the enclosing run path.
+    default_product:
+        Optional product name to use for ``/output.attrs["default"]`` when
+        ``set_default`` is true. If omitted, the first product is used.
 
     Returns
     -------
@@ -433,23 +459,26 @@ def write_h5_output_run(
 
         metadata_path = f"{run_group.name}/metadata"
         time_axis_path = f"{run_group.name}/axes/time_ns"
-        first_product_path = f"{run_group.name}/products/{rendered_products[0].name}"
+        default_product_obj = _select_default_product(rendered_products, default_product)
+        default_product_path = f"{run_group.name}/products/{default_product_obj.name}"
         run_attrs = {
             "output_id": actual_run_id,
             "output_type": output_type,
             "tool_name": tool_name,
             "created_utc": _utc_now(),
-            "software_name": "brighteyes_mcs_file",
+            "software_name": "brighteyes_mcs_dataprep",
             "software_version": _package_version(),
             "algorithm_name": algorithm_name,
             "source_file": str(Path(source_path)),
-            "output_data_path": first_product_path,
+            "output_data_path": default_product_path,
             "metadata_path": metadata_path,
             "time_axis_path": time_axis_path,
             "parameter_encoding": "attrs_and_json",
         }
         if rendered_attrs:
             run_attrs.update(rendered_attrs)
+        if default_product is not None:
+            run_attrs["output_data_path"] = default_product_path
         write_attrs(run_group, run_attrs)
 
         inputs_group = run_group.create_group("inputs")
@@ -490,6 +519,7 @@ def write_h5_output_run(
             _write_dataset_collection(intermediates_group, rendered_intermediates)
 
         if set_default:
-            output_group.attrs["default"] = actual_run_id
+            output_group.attrs["default"] = default_product_path
+            output_group.attrs["default_run"] = actual_run_path
 
     return str(target_path), actual_run_id

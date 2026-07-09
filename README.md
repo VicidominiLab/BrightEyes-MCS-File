@@ -1,114 +1,124 @@
-# BrightEyes MCS File
+# BrightEyes-MCS-DataPrep
 
-Python utilities for reading and calibrating BrightEyes MCS HDF5 files.
+Calibration and data-preparation utilities for BrightEyes MCS HDF5 files.
 
-Install `brighteyes-mcs-file` from PyPI:
+`brighteyes-mcs-dataprep` contains the writer-side and processing helpers for
+BrightEyes MCS data. It calibrates FLIM histograms, estimates channel skew,
+creates schema-compatible `/output` groups, appends derived analysis products,
+and provides plotting and HDF5 inspection helpers.
 
-    pip install brighteyes-mcs-file
+Reader functionality is intentionally kept in
+[`BrightEyes-MCS-Reader`](https://github.com/VicidominiLab/BrightEyes-MCS-Reader)
+and is imported from `brighteyes_mcs_reader` where needed.
 
-You can also install the latest development version directly from GitHub:
-
-    pip install git+https://github.com/VicidominiLab/BrightEyes-MCS-File
-
-In case of local development:
-    
-    git clone https://github.com/VicidominiLab/BrightEyes-MCS-File.git
-    cd BrightEyes-MCS-File
-    pip install -e .
-
-
-## Install for Development
+## Install
 
 ```bash
-pip install -e .[fit]
+pip install brighteyes-mcs-dataprep
 ```
 
-## Basic Usage
+For local development:
 
-```python
-from brighteyes_mcs_file import (
-    Alignment,
-    calibrate_h5_file,
-    metadata_load,
-    plot_calibration_lifetime_summary,
-    show_h5_structure_html,
-    sum_channel_applying_shifts,
-)
-
-metadata = metadata_load("data.h5")
-output_path = calibrate_h5_file("data.h5", "reference.h5", create_output=True)
-show_h5_structure_html(output_path)
+```bash
+pip install -e .
+pytest
 ```
- 
-Set `create_output=False` to write only the calibration results without the
-derived `/output` analysis group.
 
-Calibrated files are written with the BrightEyes MCS 0.0.6 root layout. The
-root contains `/raw`, `/calibration`, `/output`, and optional `/thumbnail`;
-legacy input `/data` is copied to `/raw/spad`, legacy
-`/data_channels_extra` is copied to `/raw/aux`, and old configuration groups
-are preserved under `/raw/legacy`. Routine analysis metadata is normalized
-under `/raw/metadata`, `/calibration/metadata`, and `/output/<run>/metadata`.
-Per-channel virtual datasets are grouped by source kind under
-`/output/virtual_channels/<kind>/channel_<index>` for `spad`, `aux`, and
-`analog` payloads. Use `load_raw(...)` for `/raw/spad`, `/raw/aux`, or
-`/raw/analog`, and use `load_virtual_channel(...)` instead of hard-coding
-virtual channel paths.
+## Usage
 
-## Custom Fit Models
-
-By default, fits use the historical single-exponential model with parameters
-`C`, `dT`, and `tau`. To fit a user-defined model, pass a callable that returns
-the complete fitted histogram:
+### Calibrate a file
 
 ```python
-def biexponential_model(t, irf, period, C, dT, a1, tau1, tau2):
-    first = Alignment.fit_model_data(t, 1.0, dT, tau1, irf, period)
-    second = Alignment.fit_model_data(t, 1.0, dT, tau2, irf, period)
-    model = a1 * first / first.sum() + (1.0 - a1) * second / second.sum()
-    return C * model / model.sum()
+from brighteyes_mcs_dataprep import calibrate_h5_file
 
-result = calibrate_h5_file(
-    "data.h5",
+calibrated_path = calibrate_h5_file(
+    "measurement.h5",
     "reference.h5",
-    model_fn=biexponential_model,
-    p0=[1.0, 0.0, 0.5, 1.5, 4.0],
-    bounds=([0.0, -45.5, 0.0, 0.01, 0.01], [float("inf"), 45.5, 1.0, 25.0, 25.0]),
-    parameter_names=["C", "dT", "a1", "tau1", "tau2"],
-    lifetime_param="tau1",
+    data_key=("data", "data_channels_extra"),
+    reference_key=None,
+    reference_type="ref",
+    period_ns=12.5,
 )
 ```
 
-Custom calibration outputs keep the legacy datasets when possible and also add
-generic `fit_parameter_names`, `fit_params`, `fit_parameter_errors`, and
-`fit_covariance` datasets.
+By default the calibrated copy is written next to the input file with a
+`_calib.h5` suffix. Calibration results are stored under
+`/calibration/results/<product>/`, and the `/output` group is created unless
+`create_output=False` is passed.
 
-The same model configuration can be used for pixel-wise fit maps:
+### Build standard outputs
 
 ```python
-fit_maps = Alignment.generate_fit_maps(
-    data_image,  # shape (y, x, t)
-    irf,
-    t,
-    period,
-    model_fn=biexponential_model,
-    p0=[1.0, 0.0, 0.5, 1.5, 4.0],
-    bounds=([0.0, -45.5, 0.0, 0.01, 0.01], [float("inf"), 45.5, 1.0, 25.0, 25.0]),
-    parameter_names=["C", "dT", "a1", "tau1", "tau2"],
-    lifetime_param="tau1",
-)
+from brighteyes_mcs_dataprep import build_h5_output
 
-fit_stack, fit_stack_names = Alignment.fit_maps_to_stack(fit_maps)
+build_h5_output(
+    "measurement_calib.h5",
+    create_virtual_channels=True,
+    create_sum_channels=True,
+    create_sum_channels_with_skew_correction=True,
+)
 ```
 
-For the built-in single-exponential map fit, `C` remains fixed to `1.0` by
-default. Custom map fits estimate all parameters by default; pass
-`force_C_normalized=True` if a custom model's `C` parameter should also be
-fixed.
+The output builder creates virtual per-channel datasets and summed SPAD/AUX
+products under `/output`. It reads current schema paths such as `/raw/spad` and
+`/raw/aux` by default. Legacy root-level datasets can be selected explicitly,
+for example `spad_data_key="data"` or `aux_data_key="data_channels_extra"`.
 
-The package includes a local `mcs` module, so calibration no longer imports
-`brighteyes_ism.dataio.mcs`.
+### Append analysis products
 
-The HDF5 calibration workflow notebook is in
-`examples/Calibrate_h5_file_Workflow.ipynb`. Install notebook-only helpers with
-`pip install -e .[notebook]`.
+```python
+import numpy as np
+
+from brighteyes_mcs_dataprep import H5OutputProduct, write_h5_output_run
+
+written_path, run_id = write_h5_output_run(
+    "measurement_calib.h5",
+    "apr_001",
+    [
+        H5OutputProduct(
+            "spad",
+            np.ones((256, 256)),
+            attrs={
+                "data_role": "image",
+                "axis_order": "y,x",
+                "source_data_path": "/raw/spad",
+                "units": "counts",
+            },
+        )
+    ],
+    tool_name="APR reassignment",
+    algorithm_name="adaptive_pixel_reassignment",
+    set_default=True,
+)
+```
+
+Existing run IDs are versioned automatically, so a second write to `apr_001`
+becomes `apr_002` unless `output_key_overwrite=True` is passed.
+
+## Public API
+
+Common imports are exposed directly from `brighteyes_mcs_dataprep`:
+
+```python
+from brighteyes_mcs_dataprep import (
+    H5DataCalibrator,
+    H5OutputBuilder,
+    H5OutputProduct,
+    build_h5_output,
+    calibrate_h5_file,
+    estimate_channel_skew,
+    show_h5_structure,
+    write_h5_output_run,
+)
+```
+
+Alignment and plotting helpers are also available through `Alignment` or as
+lazy top-level exports.
+
+## HDF5 Schema Notes
+
+Current BrightEyes files store measured data under `/raw`, metadata under
+`/raw/metadata`, calibration artifacts under `/calibration`, and derived
+analysis runs under `/output/<run_id>`. The data-preparation helpers preserve
+this layout and add provenance attributes, source-file hashes, and default
+output pointers where appropriate.

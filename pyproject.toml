@@ -3,12 +3,12 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "brighteyes-mcs-file"
-version = "0.2.5"
-description = "Utilities for reading and calibrating BrightEyes MCS HDF5 files."
+name = "brighteyes-mcs-dataprep"
+version = "0.1.0"
+description = "Calibration, output-building, and data preparation utilities for BrightEyes MCS HDF5 files."
 readme = "README.md"
 requires-python = ">=3.9"
-license = "GPL-3.0-or-later"
+license = "GPL-3.0-only"
 license-files = ["LICENSE"]
 authors = [
     { name = "Mattia Donato", email = "mattia.donato@iit.it" },
@@ -25,31 +25,24 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Image Processing",
 ]
 dependencies = [
+    "build",
+    "brighteyes-mcs-reader",
     "h5py",
+    "joblib",
+    "jupyter",
     "matplotlib",
     "numpy",
+    "pandas",
+    "pytest",
     "scipy",
+    "torch",
+    "twine",
     "tqdm",
 ]
 
-[project.optional-dependencies]
-fit = [
-    "joblib",
-    "torch",
-]
-dev = [
-    "build",
-    "pytest",
-    "twine",
-]
-notebook = [
-    "jupyter",
-    "pandas",
-]
-
 [project.urls]
-Homepage = "https://github.com/VicidominiLab/BrightEyes-MCS-File"
-Repository = "https://github.com/VicidominiLab/BrightEyes-MCS-File"
+Homepage = "https://github.com/VicidominiLab/BrightEyes-MCS-DataPrep"
+Repository = "https://github.com/VicidominiLab/BrightEyes-MCS-DataPrep"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -4,8 +4,8 @@ import h5py
 import numpy as np
 import pytest
 
-from brighteyes_mcs_file import load_default_output_spad, load_virtual_channel
-from brighteyes_mcs_file.h5_data_calibrator import (
+from brighteyes_mcs_reader import load_default_output_spad, load_virtual_channel
+from brighteyes_mcs_dataprep.h5_data_calibrator import (
     DEFAULT_SUM_IRF_TRACE_ID,
     DEFAULT_SUM_CHANNELS_RUN_ID,
     DEFAULT_SUM_CHANNELS_WITH_SKEW_CORRECTION_RUN_ID,
@@ -186,7 +186,7 @@ def test_create_common_shifted_calibration_trace(tmp_path):
 
         assert dataset.name == f"/output/{DEFAULT_SUM_IRF_TRACE_ID}/products/trace"
         np.testing.assert_allclose(dataset[...], [11.0, 22.0, 33.0, 44.0])
-        assert output_group.attrs["default_irf_trace_id"] == DEFAULT_SUM_IRF_TRACE_ID
+        assert output_group.attrs["default_irf_trace_id"] == dataset.name
         assert f"{DEFAULT_SUM_IRF_TRACE_ID}_path" not in output_group.attrs
         assert "default_sum_irf_trace_path" not in output_group.attrs
         assert "sum_irf_trace_ids_json" not in output_group.attrs
@@ -368,7 +368,10 @@ def test_build_output_defaults_and_summed_irf_reference_products(tmp_path):
     with h5py.File(input_path, "r") as h5:
         output_group = h5["output"]
         assert output_group.attrs["default"] == (
-            DEFAULT_SUM_CHANNELS_WITH_SKEW_CORRECTION_RUN_ID
+            f"/output/{DEFAULT_SUM_CHANNELS_WITH_SKEW_CORRECTION_RUN_ID}/products/spad"
+        )
+        assert output_group.attrs["default_run"] == (
+            f"/output/{DEFAULT_SUM_CHANNELS_WITH_SKEW_CORRECTION_RUN_ID}"
         )
         assert "metadata" not in output_group
         assert "default_run_id" not in output_group.attrs
@@ -390,8 +393,8 @@ def test_build_output_defaults_and_summed_irf_reference_products(tmp_path):
         sum_reference = h5[f"output/{DEFAULT_SUM_REFERENCE_TRACE_ID}/products/trace"]
         np.testing.assert_allclose(sum_irf[...], irf_trace.sum(axis=-1))
         np.testing.assert_allclose(sum_reference[...], reference_trace.sum(axis=-1))
-        assert output_group.attrs["default_irf_trace_id"] == DEFAULT_SUM_IRF_TRACE_ID
-        assert output_group.attrs["default_ref_trace_id"] == DEFAULT_SUM_REFERENCE_TRACE_ID
+        assert output_group.attrs["default_irf_trace_id"] == sum_irf.name
+        assert output_group.attrs["default_ref_trace_id"] == sum_reference.name
         assert "default_sum_irf_trace_id" not in output_group.attrs
         assert "default_sum_irf_trace_path" not in output_group.attrs
         assert "default_sum_reference_trace_id" not in output_group.attrs
@@ -420,7 +423,10 @@ def test_build_output_defaults_and_summed_irf_reference_products(tmp_path):
     with h5py.File(input_path, "r") as h5:
         output_group = h5["output"]
         assert output_group.attrs["default"] == (
-            DEFAULT_SUM_CHANNELS_WITH_SKEW_CORRECTION_RUN_ID
+            f"/output/{DEFAULT_SUM_CHANNELS_WITH_SKEW_CORRECTION_RUN_ID}/products/spad"
+        )
+        assert output_group.attrs["default_run"] == (
+            f"/output/{DEFAULT_SUM_CHANNELS_WITH_SKEW_CORRECTION_RUN_ID}"
         )
         assert "default_run_id" not in output_group.attrs
         assert "run_count" not in output_group.attrs
@@ -428,8 +434,12 @@ def test_build_output_defaults_and_summed_irf_reference_products(tmp_path):
         assert DEFAULT_SUM_CHANNELS_WITH_SKEW_CORRECTION_RUN_ID in output_group
         assert DEFAULT_SUM_IRF_TRACE_ID in output_group
         assert DEFAULT_SUM_REFERENCE_TRACE_ID in output_group
-        assert output_group.attrs["default_irf_trace_id"] == DEFAULT_SUM_IRF_TRACE_ID
-        assert output_group.attrs["default_ref_trace_id"] == DEFAULT_SUM_REFERENCE_TRACE_ID
+        assert output_group.attrs["default_irf_trace_id"] == (
+            f"/output/{DEFAULT_SUM_IRF_TRACE_ID}/products/trace"
+        )
+        assert output_group.attrs["default_ref_trace_id"] == (
+            f"/output/{DEFAULT_SUM_REFERENCE_TRACE_ID}/products/trace"
+        )
 
 
 def test_circular_output_writes_matching_circular_axes(tmp_path):

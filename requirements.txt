@@ -1,5 +1,13 @@
+build
+brighteyes-mcs-reader
 h5py
+joblib
+jupyter
 matplotlib
 numpy
+pandas
+pytest
 scipy
+torch
+twine
 tqdm

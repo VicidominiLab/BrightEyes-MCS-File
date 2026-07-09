@@ -3,8 +3,8 @@ import json
 import h5py
 import numpy as np
 
-from brighteyes_mcs_file import H5OutputProduct, write_h5_output_run
-from brighteyes_mcs_file.h5_file_hash import channel_fingerprint_file_hash
+from brighteyes_mcs_dataprep import H5OutputProduct, write_h5_output_run
+from brighteyes_mcs_dataprep.h5_file_hash import channel_fingerprint_file_hash
 
 
 def _source_file(path):
@@ -41,6 +41,7 @@ def test_write_h5_output_run_appends_and_versions_existing_run(tmp_path):
         assert "raw" in handle
         assert handle.attrs["contains_output"]
         assert handle["output"].attrs["default"] == ""
+        assert handle["output"].attrs["default_run"] == ""
         assert "apr_001" in handle["output"]
         assert "apr_002" in handle["output"]
         provenance = handle["output/apr_001/provenance"].attrs
@@ -88,6 +89,66 @@ def test_write_h5_output_run_overwrites_only_requested_run(tmp_path):
         np.testing.assert_array_equal(
             handle["output/apr_001/products/spad"][...],
             np.full((2, 3), 4.0),
+        )
+
+
+def test_write_h5_output_run_default_points_to_product_dataset_path(tmp_path):
+    source_path = _source_file(tmp_path / "sample_calib.h5")
+
+    write_h5_output_run(
+        source_path,
+        "apr_001",
+        [H5OutputProduct("apr", np.ones((2, 3)))],
+        set_default=True,
+    )
+
+    with h5py.File(source_path, "r") as handle:
+        assert handle["output"].attrs["default"] == "/output/apr_001/products/apr"
+        assert handle["output"].attrs["default_run"] == "/output/apr_001"
+
+
+def test_write_h5_output_run_default_product_selects_non_first_product(tmp_path):
+    source_path = _source_file(tmp_path / "sample_calib.h5")
+
+    write_h5_output_run(
+        source_path,
+        "apr_001",
+        [
+            H5OutputProduct("apr", np.ones((1, 2, 3, 4, 5, 6))),
+            H5OutputProduct("apr_sum", np.ones((1, 2, 3, 4, 5))),
+        ],
+        attrs={"output_data_path": "/output/{run_id}/products/apr"},
+        set_default=True,
+        default_product="apr_sum",
+    )
+
+    with h5py.File(source_path, "r") as handle:
+        assert handle["output"].attrs["default"] == "/output/apr_001/products/apr_sum"
+        assert handle["output/apr_001"].attrs["output_data_path"] == (
+            "/output/apr_001/products/apr_sum"
+        )
+
+
+def test_write_h5_output_run_default_product_accepts_product_path(tmp_path):
+    source_path = _source_file(tmp_path / "sample_calib.h5")
+
+    write_h5_output_run(
+        source_path,
+        "s2ism_001",
+        [
+            H5OutputProduct("preview", np.ones((2, 3))),
+            H5OutputProduct("s2ism", np.ones((2, 3, 4))),
+        ],
+        set_default=True,
+        default_product="/output/s2ism_001/products/s2ism",
+    )
+
+    with h5py.File(source_path, "r") as handle:
+        assert handle["output"].attrs["default"] == (
+            "/output/s2ism_001/products/s2ism"
+        )
+        assert handle["output/s2ism_001"].attrs["output_data_path"] == (
+            "/output/s2ism_001/products/s2ism"
         )
 
 

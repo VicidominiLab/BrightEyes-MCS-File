@@ -15,8 +15,9 @@ import h5py
 import numpy as np
 from tqdm.auto import tqdm
 
+from brighteyes_mcs_reader import reader_legacy
+
 from .alignment import Alignment
-from . import mcs
 from .channel_skew_estimator import estimate_channel_skew
 from .h5_file_hash import channel_fingerprint_file_hash_attrs
 from .h5_output_writers import ensure_output_group
@@ -743,7 +744,7 @@ class H5DataCalibrator:
         if version is None:
             return "unknown"
         try:
-            return version("brighteyes-mcs-file")
+            return version("brighteyes-mcs-dataprep")
         except PackageNotFoundError:
             return "unknown"
 
@@ -1965,8 +1966,8 @@ class H5DataCalibrator:
         )
 
     def calibrate(self):
-        data_metadata = mcs.metadata_load(str(self.data_path))
-        reference_metadata = mcs.metadata_load(str(self.reference_path))
+        data_metadata = reader_legacy.metadata_load(str(self.data_path))
+        reference_metadata = reader_legacy.metadata_load(str(self.reference_path))
         output_path = self._prepare_output_file()
 
         with h5py.File(self.data_path, "r") as data_handle, \
@@ -2043,7 +2044,7 @@ class H5DataCalibrator:
             self._set_group_attrs(
                 provenance_group,
                 {
-                    "created_by_package": "brighteyes_mcs_file",
+                    "created_by_package": "brighteyes_mcs_dataprep",
                     "created_by_version": self._package_version(),
                     "created_at_iso8601": self._utc_now(),
                     "source_data_file": str(self.data_path),
@@ -3049,8 +3050,8 @@ class H5OutputBuilder:
         if default_id_attr is None:
             return
         default_id = str(output_group.attrs.get(default_id_attr, ""))
-        if not default_id or default_id == output_id:
-            output_group.attrs[default_id_attr] = output_id
+        if not default_id or default_id in {output_id, output_path}:
+            output_group.attrs[default_id_attr] = output_path
 
     def _create_common_run_groups(self, run_group):
         run_group.create_group("intermediates")
@@ -3122,7 +3123,7 @@ class H5OutputBuilder:
         if version is None:
             return "unknown"
         try:
-            return version("brighteyes-mcs-file")
+            return version("brighteyes-mcs-dataprep")
         except PackageNotFoundError:
             return "unknown"
 
@@ -3133,7 +3134,7 @@ class H5OutputBuilder:
     @staticmethod
     def _read_mcs_metadata(path):
         try:
-            return mcs.metadata_load(str(path))
+            return reader_legacy.metadata_load(str(path))
         except Exception:
             return None
 
@@ -4001,7 +4002,7 @@ class H5OutputBuilder:
                 "trace_kind": trace_kind,
                 "tool_name": long_name,
                 "created_utc": self._utc_now(),
-                "software_name": "brighteyes_mcs_file",
+                "software_name": "brighteyes_mcs_dataprep",
                 "software_version": self._package_version(),
                 "algorithm_name": "sum_channel_applying_shifts",
                 "algorithm_version": "0.1.0",
@@ -4140,7 +4141,7 @@ class H5OutputBuilder:
                 "output_type": "image_tool",
                 "tool_name": SUM_CHANNELS_TOOL_NAME,
                 "created_utc": self._utc_now(),
-                "software_name": "brighteyes_mcs_file",
+                "software_name": "brighteyes_mcs_dataprep",
                 "software_version": self._package_version(),
                 "algorithm_name": "sum_along_channel_axis",
                 "algorithm_version": "0.1.0",
@@ -4299,7 +4300,7 @@ class H5OutputBuilder:
                 "output_type": "image_tool",
                 "tool_name": SUM_CHANNELS_WITH_SKEW_CORRECTION_TOOL_NAME,
                 "created_utc": self._utc_now(),
-                "software_name": "brighteyes_mcs_file",
+                "software_name": "brighteyes_mcs_dataprep",
                 "software_version": self._package_version(),
                 "algorithm_name": "sum_channel_applying_shifts",
                 "algorithm_version": "0.1.0",
@@ -4489,10 +4490,12 @@ class H5OutputBuilder:
             if self.create_virtual_channels:
                 analog_info = self._resolve_analog_source_info(handle)
                 self._create_virtual_channels(output_group, primary_info, extra_info, analog_info)
-            default_run = ""
+            default_product_path = ""
+            default_run_path = ""
             if self.create_sum_channels:
                 self._create_sum_channels_run(handle, output_group, primary_info, extra_info)
-                default_run = self.sum_channels_run_id
+                default_product_path = self._product_path(self.sum_channels_run_id, "spad")
+                default_run_path = self._run_path(self.sum_channels_run_id)
             if self.create_sum_channels_with_skew_correction:
                 shifted_created = self._create_sum_channels_with_skew_correction_run(
                     handle,
@@ -4501,9 +4504,16 @@ class H5OutputBuilder:
                     extra_info,
                 )
                 if shifted_created:
-                    default_run = self.sum_channels_with_skew_correction_run_id
+                    default_product_path = self._product_path(
+                        self.sum_channels_with_skew_correction_run_id,
+                        "spad",
+                    )
+                    default_run_path = self._run_path(
+                        self.sum_channels_with_skew_correction_run_id
+                    )
 
-            output_group.attrs["default"] = default_run
+            output_group.attrs["default"] = default_product_path
+            output_group.attrs["default_run"] = default_run_path
 
         return str(output_path)
 

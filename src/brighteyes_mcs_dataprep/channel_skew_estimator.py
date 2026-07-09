@@ -4,7 +4,7 @@
 This module provides a lightweight, dependency-free (NumPy-only) implementation
 of per-channel skew estimation using FFT-based cross-correlation with
 sub-bin quadratic peak refinement. It's intended to be copied into other
-projects and used independently of brighteyes_flim or brighteyes_ism.
+projects and used independently of brighteyes_flism or brighteyes_ism.
 
 Functions
 - estimate_channel_skew: estimate per-channel shifts (in bins) for a set of
@@ -13,7 +13,7 @@ Functions
 Usage example
 -------------
 >>> import numpy as np
->>> from brighteyes_mcs_file import estimate_channel_skew
+>>> from brighteyes_mcs_dataprep import estimate_channel_skew
 >>> t = 256
 >>> ch = 8
 >>> # synthetic data: a reference pulse shifted progressively

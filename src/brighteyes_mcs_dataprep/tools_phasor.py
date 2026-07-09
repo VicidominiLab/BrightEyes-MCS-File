@@ -1,4 +1,4 @@
-"""Minimal lifetime estimators used by :mod:`brighteyes_mcs_file.alignment`."""
+"""Minimal lifetime estimators used by :mod:`brighteyes_mcs_dataprep.alignment`."""
 
 import numpy as np
 from scipy.signal import savgol_filter
